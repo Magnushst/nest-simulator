@@ -274,6 +274,12 @@ public:
   Stopwatch< StopwatchGranularity::Detailed, StopwatchParallelism::MasterOnly > get_sw_communicate_spike_data() const;
 
   /**
+   * Returns the elapsed time of sw_collocate_spike_data_
+   * Used in SimulationManager::update_() for cycle timers
+   */
+  Stopwatch< StopwatchGranularity::Detailed, StopwatchParallelism::MasterOnly > get_sw_collocate_spike_data() const;
+
+  /**
    * Accumulates the spike counts stored in local_spike_counter_
    * Used in SimulationManager::update_() for cycle timers
    */

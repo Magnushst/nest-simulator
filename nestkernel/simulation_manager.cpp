@@ -26,8 +26,10 @@
 #include <sys/time.h>
 
 // C++ includes:
+#include <algorithm>
 #include <iomanip>
 #include <limits>
+#include <utility>
 #include <vector>
 
 // Includes from libnestutil:
@@ -856,6 +858,20 @@ nest::SimulationManager::update_()
 #ifdef CYCLE_TIMERS
   double start_current_communicate = kernel().event_delivery_manager.get_sw_communicate_spike_data().elapsed();
   size_t start_local_spike_counter = kernel().event_delivery_manager.get_local_spike_counter();
+  double start_current_gather = sw_gather_spike_data_.elapsed();
+  double start_current_collocate =
+    kernel().event_delivery_manager.get_sw_collocate_spike_data().elapsed();
+  double start_current_mpi = kernel().get_mpi_synchronization_stopwatch().elapsed();
+  // Per-thread start and end values, allocated once here, so that logging a cycle allocates no memory.
+  std::vector< double > start_current_update_vec;
+  std::vector< double > start_current_deliver;
+  std::vector< double > start_current_omp;
+  sw_update_.elapsed_per_thread_wall( start_current_update_vec );
+  sw_deliver_spike_data_.elapsed_per_thread_wall( start_current_deliver );
+  kernel().get_omp_synchronization_simulation_stopwatch().elapsed_per_thread_wall( start_current_omp );
+  std::vector< double > end_current_update_vec( start_current_update_vec.size() );
+  std::vector< double > end_current_deliver( start_current_deliver.size() );
+  std::vector< double > end_current_omp( start_current_omp.size() );
 #endif
 
 // parallel section begins
@@ -1126,11 +1142,58 @@ nest::SimulationManager::update_()
           const double communicate_time = end_current_communicate - start_current_communicate;
           start_current_communicate = end_current_communicate;
 
+          const double end_current_gather = sw_gather_spike_data_.elapsed();
+          const double gather_time = end_current_gather - start_current_gather;
+          start_current_gather = end_current_gather;
+
+          const double end_current_collocate =
+            kernel().event_delivery_manager.get_sw_collocate_spike_data().elapsed();
+          const double collocate_time = end_current_collocate - start_current_collocate;
+          start_current_collocate = end_current_collocate;
+
+          const double end_current_mpi = kernel().get_mpi_synchronization_stopwatch().elapsed();
+          const double mpi_time = end_current_mpi - start_current_mpi;
+          start_current_mpi = end_current_mpi;
+
+          // Per-thread stopwatches (update, deliver, omp-sync): the rank-level value is the
+          // maximum over threads, with the mean as the uniformity diagnostic. Differencing is
+          // per thread: the maximum of cumulative values is not the cumulative maximum.
+          auto phase_max_mean = []( const std::vector< double >& end, std::vector< double >& start )
+          {
+            double mx = 0.0, sum = 0.0;
+            for ( size_t t = 0; t < end.size(); ++t )
+            {
+              const double d = end[ t ] - start[ t ];
+              mx = std::max( mx, d );
+              sum += d;
+            }
+            start = end;
+            return std::make_pair( mx, sum / end.size() );
+          };
+
+          sw_update_.elapsed_per_thread_wall( end_current_update_vec );
+          sw_deliver_spike_data_.elapsed_per_thread_wall( end_current_deliver );
+          kernel().get_omp_synchronization_simulation_stopwatch().elapsed_per_thread_wall( end_current_omp );
+          const auto update_mm = phase_max_mean( end_current_update_vec, start_current_update_vec );
+          const auto deliver_mm = phase_max_mean( end_current_deliver, start_current_deliver );
+          const auto omp_mm = phase_max_mean( end_current_omp, start_current_omp );
+
           const size_t end_local_spike_counter = kernel().event_delivery_manager.get_local_spike_counter();
           const size_t local_spike_counter = end_local_spike_counter - start_local_spike_counter;
           start_local_spike_counter = end_local_spike_counter;
 
-          cycle_time_log_.add_entry( update_time, communicate_time, local_spike_counter );
+          cycle_time_log_.add_entry( update_time,
+            communicate_time,
+            local_spike_counter,
+            update_mm.first,
+            update_mm.second,
+            deliver_mm.first,
+            deliver_mm.second,
+            omp_mm.first,
+            omp_mm.second,
+            gather_time,
+            collocate_time,
+            mpi_time );
 
 #endif
         }

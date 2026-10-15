@@ -131,6 +131,33 @@ Stopwatch< detailed_timer, threaded_timer >::elapsed( timers::timeunit_t timeuni
 
 template < StopwatchGranularity detailed_timer, StopwatchParallelism threaded_timer >
 void
+Stopwatch< detailed_timer, threaded_timer >::elapsed_per_thread_wall( std::vector< double >& wall_times ) const
+{
+  // No single-threaded assert: the master calls this inside the parallel region to log one
+  // cycle, after the barrier. A thread may not yet have stopped its OpenMP synchronisation
+  // timer; a running timer returns its time so far, and the rest counts in the next cycle.
+  if constexpr ( enable_timer )
+  {
+    if constexpr ( use_timer_array )
+    {
+      wall_times.resize( walltime_timer_.size() );
+      for ( size_t t = 0; t < walltime_timer_.size(); ++t )
+      {
+        wall_times[ t ] = walltime_timer_[ t ].elapsed();
+      }
+      return;
+    }
+    else
+    {
+      wall_times.assign( 1, walltime_timer_.elapsed() );
+      return;
+    }
+  }
+  wall_times.assign( 1, 0.0 );
+}
+
+template < StopwatchGranularity detailed_timer, StopwatchParallelism threaded_timer >
+void
 Stopwatch< detailed_timer, threaded_timer >::print( const std::string& msg,
   timers::timeunit_t timeunit,
   std::ostream& os ) const

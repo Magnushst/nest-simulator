@@ -1093,6 +1093,11 @@ EventDeliveryManager::get_sw_communicate_spike_data() const
 {
   return sw_communicate_spike_data_;
 }
+Stopwatch< StopwatchGranularity::Detailed, StopwatchParallelism::MasterOnly >
+EventDeliveryManager::get_sw_collocate_spike_data() const
+{
+  return sw_collocate_spike_data_;
+}
 
 size_t
 EventDeliveryManager::get_local_spike_counter() const

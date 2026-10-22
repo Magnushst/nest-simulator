@@ -47,11 +47,14 @@ public:
     double update_mean,
     double deliver_max,
     double deliver_mean,
-    double omp_max,
-    double omp_mean,
     double gather_time,
     double collocate_time,
-    double mpi_time );
+    double mpi_time,
+    long deliver_connections,
+    long spike_buffer_first,
+    long spike_buffer_last );
+  //! The OpenMP synchronisation values of the same cycle, added once the threads' stopped values are published.
+  void add_omp_entry( double omp_max, double omp_mean );
   void to_dict( Dictionary& ) const;
 
 private:
@@ -67,6 +70,9 @@ private:
   std::vector< double > gather_time_;           // Time of gather in current cycle
   std::vector< double > collocate_time_;        // Time of collocate in current cycle
   std::vector< double > mpi_time_;              // Time of mpi synchronisation in current cycle
+  std::vector< size_t > deliver_connections_;   // Connections visited by spike delivery in current cycle
+  std::vector< size_t > spike_buffer_first_;    // Spike buffer per rank in the first all-to-all of current cycle
+  std::vector< size_t > spike_buffer_last_;     // Spike buffer per rank in the last all-to-all of current cycle
 };
 
 }

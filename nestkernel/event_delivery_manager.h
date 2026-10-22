@@ -284,6 +284,20 @@ public:
    * Used in SimulationManager::update_() for cycle timers
    */
   size_t get_local_spike_counter() const;
+
+  /**
+   * Sum over threads of the connections visited by deliver_events(), cumulative
+   * Used in SimulationManager::update_() for cycle timers
+   */
+  size_t get_local_deliver_connections() const;
+
+  /**
+   * Spike buffer section per rank, in entries, in the first and in the last all-to-all of the latest
+   * gather_spike_data(); they differ only when the buffer had to grow
+   * Used in SimulationManager::update_() for cycle timers
+   */
+  size_t get_spike_buffer_first() const;
+  size_t get_spike_buffer_last() const;
 #endif
 
 private:
@@ -451,6 +465,13 @@ private:
    * Number of generated spike events (both off- and on-grid) during the last call to simulate.
    */
   std::vector< unsigned long > local_spike_counter_;
+
+  //! Connections visited by deliver_events() on each thread, cumulative; counted only with cycle timers.
+  std::vector< size_t > local_deliver_connections_;
+
+  //! Spike buffer section per rank in the first and last all-to-all of the latest gather; cycle timers only.
+  size_t spike_buffer_first_;
+  size_t spike_buffer_last_;
 
   std::vector< SpikeData > send_buffer_spike_data_;
   std::vector< SpikeData > recv_buffer_spike_data_;

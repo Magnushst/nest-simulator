@@ -862,6 +862,7 @@ nest::SimulationManager::update_()
   double start_current_collocate =
     kernel().event_delivery_manager.get_sw_collocate_spike_data().elapsed();
   double start_current_mpi = kernel().get_mpi_synchronization_stopwatch().elapsed();
+  size_t start_deliver_connections = kernel().event_delivery_manager.get_local_deliver_connections();
   // Per-thread start and end values, allocated once here, so that logging a cycle allocates no memory.
   std::vector< double > start_current_update_vec;
   std::vector< double > start_current_deliver;
@@ -871,7 +872,25 @@ nest::SimulationManager::update_()
   kernel().get_omp_synchronization_simulation_stopwatch().elapsed_per_thread_wall( start_current_omp );
   std::vector< double > end_current_update_vec( start_current_update_vec.size() );
   std::vector< double > end_current_deliver( start_current_deliver.size() );
+  // One slot per thread timer. Each thread writes its own stopped OpenMP synchronisation time into its slot
+  // after the closing update barrier; the master reads the slots only after the barrier that ends its block.
   std::vector< double > end_current_omp( start_current_omp.size() );
+
+  // Per-thread stopwatches (update, deliver, omp-sync): the rank-level value is the
+  // maximum over threads, with the mean as the uniformity diagnostic. Differencing is
+  // per thread: the maximum of cumulative values is not the cumulative maximum.
+  auto phase_max_mean = []( const std::vector< double >& end, std::vector< double >& start )
+  {
+    double mx = 0.0, sum = 0.0;
+    for ( size_t t = 0; t < end.size(); ++t )
+    {
+      const double d = end[ t ] - start[ t ];
+      mx = std::max( mx, d );
+      sum += d;
+    }
+    start = end;
+    return std::make_pair( mx, sum / end.size() );
+  };
 #endif
 
 // parallel section begins
@@ -1092,11 +1111,25 @@ nest::SimulationManager::update_()
         kernel().get_omp_synchronization_simulation_stopwatch().start();
 #pragma omp barrier
         kernel().get_omp_synchronization_simulation_stopwatch().stop();
+#ifdef CYCLE_TIMERS
+        // Publish this thread's own, now stopped, OpenMP synchronisation time. The barrier that ends the master
+        // block below orders this write before the master's read; the next write comes after the next closing
+        // update barrier, which the master reaches only after its read. No barrier is added.
+        if ( tid < end_current_omp.size() )
+        {
+          end_current_omp[ tid ] = kernel().get_omp_synchronization_simulation_stopwatch().elapsed();
+        }
+#endif
 
         // the following block is executed by the master thread only
         // the other threads are enforced to wait at the end of the block
 #pragma omp master
         {
+#ifdef CYCLE_TIMERS
+          // Spike buffer per rank in this cycle's first and last all-to-all; zero if the cycle exchanges no spikes.
+          size_t spike_buffer_first = 0;
+          size_t spike_buffer_last = 0;
+#endif
           // gather and deliver only at end of slice, i.e., end of min_delay step
           if ( to_step_ == kernel().connection_manager.get_min_delay() )
           {
@@ -1105,6 +1138,10 @@ nest::SimulationManager::update_()
               sw_gather_spike_data_.start();
               kernel().event_delivery_manager.gather_spike_data();
               sw_gather_spike_data_.stop();
+#ifdef CYCLE_TIMERS
+              spike_buffer_first = kernel().event_delivery_manager.get_spike_buffer_first();
+              spike_buffer_last = kernel().event_delivery_manager.get_spike_buffer_last();
+#endif
             }
             if ( kernel().connection_manager.secondary_connections_exist() )
             {
@@ -1155,32 +1192,22 @@ nest::SimulationManager::update_()
           const double mpi_time = end_current_mpi - start_current_mpi;
           start_current_mpi = end_current_mpi;
 
-          // Per-thread stopwatches (update, deliver, omp-sync): the rank-level value is the
-          // maximum over threads, with the mean as the uniformity diagnostic. Differencing is
-          // per thread: the maximum of cumulative values is not the cumulative maximum.
-          auto phase_max_mean = []( const std::vector< double >& end, std::vector< double >& start )
-          {
-            double mx = 0.0, sum = 0.0;
-            for ( size_t t = 0; t < end.size(); ++t )
-            {
-              const double d = end[ t ] - start[ t ];
-              mx = std::max( mx, d );
-              sum += d;
-            }
-            start = end;
-            return std::make_pair( mx, sum / end.size() );
-          };
-
+          // Every thread stopped its update and delivery stopwatches, and added to its delivery counter, before
+          // the closing update barrier, and restarts them only after the barrier that ends this block. So these
+          // reads of other threads' values are ordered. The OpenMP synchronisation times are read after that
+          // barrier, below.
           sw_update_.elapsed_per_thread_wall( end_current_update_vec );
           sw_deliver_spike_data_.elapsed_per_thread_wall( end_current_deliver );
-          kernel().get_omp_synchronization_simulation_stopwatch().elapsed_per_thread_wall( end_current_omp );
           const auto update_mm = phase_max_mean( end_current_update_vec, start_current_update_vec );
           const auto deliver_mm = phase_max_mean( end_current_deliver, start_current_deliver );
-          const auto omp_mm = phase_max_mean( end_current_omp, start_current_omp );
 
           const size_t end_local_spike_counter = kernel().event_delivery_manager.get_local_spike_counter();
           const size_t local_spike_counter = end_local_spike_counter - start_local_spike_counter;
           start_local_spike_counter = end_local_spike_counter;
+
+          const size_t end_deliver_connections = kernel().event_delivery_manager.get_local_deliver_connections();
+          const size_t deliver_connections = end_deliver_connections - start_deliver_connections;
+          start_deliver_connections = end_deliver_connections;
 
           cycle_time_log_.add_entry( update_time,
             communicate_time,
@@ -1189,16 +1216,28 @@ nest::SimulationManager::update_()
             update_mm.second,
             deliver_mm.first,
             deliver_mm.second,
-            omp_mm.first,
-            omp_mm.second,
             gather_time,
             collocate_time,
-            mpi_time );
+            mpi_time,
+            deliver_connections,
+            spike_buffer_first,
+            spike_buffer_last );
 
 #endif
         }
 // end of master section, all threads have to synchronize at this point
 #pragma omp barrier
+
+#ifdef CYCLE_TIMERS
+        // The OpenMP synchronisation times every thread published after its stop above. The barrier just passed
+        // orders all those writes before this read; each thread writes again only after the next closing update
+        // barrier, which the master reaches only after this block. No barrier is added.
+#pragma omp master
+        {
+          const auto omp_mm = phase_max_mean( end_current_omp, start_current_omp );
+          cycle_time_log_.add_omp_entry( omp_mm.first, omp_mm.second );
+        }
+#endif
 
         if ( update_time_limit_exceeded )
         {

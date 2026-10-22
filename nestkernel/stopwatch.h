@@ -320,7 +320,8 @@ public:
   double elapsed( timers::timeunit_t timeunit = timers::timeunit_t::SECONDS ) const;
   //! Per-thread cumulative wall time in seconds, for the cycle log, written into wall_times (resized to one entry
   //! per thread timer, so no allocation once the size is right). No single-threaded assert: the master reads
-  //! these after a barrier.
+  //! these only for stopwatches that every thread stopped before a barrier the master has passed since, and
+  //! restarts only after a later barrier.
   void elapsed_per_thread_wall( std::vector< double >& wall_times ) const;
 
   void reset();

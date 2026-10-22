@@ -133,9 +133,9 @@ template < StopwatchGranularity detailed_timer, StopwatchParallelism threaded_ti
 void
 Stopwatch< detailed_timer, threaded_timer >::elapsed_per_thread_wall( std::vector< double >& wall_times ) const
 {
-  // No single-threaded assert: the master calls this inside the parallel region to log one
-  // cycle, after the barrier. A thread may not yet have stopped its OpenMP synchronisation
-  // timer; a running timer returns its time so far, and the rest counts in the next cycle.
+  // No single-threaded assert: the master calls this inside the parallel region to log one cycle.
+  // Only for stopwatches that every thread stopped before a barrier the master has passed since,
+  // and restarts only after a later barrier: reading another thread's running timer is a data race.
   if constexpr ( enable_timer )
   {
     if constexpr ( use_timer_array )

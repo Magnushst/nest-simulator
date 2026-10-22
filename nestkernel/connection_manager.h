@@ -300,7 +300,11 @@ public:
 
   bool get_user_set_delay_extrema() const;
 
-  void send( const size_t tid,
+  /**
+   * Send event e to the targets of one source on thread tid, starting at connection lcid.
+   * Returns the number of connections visited (Connector::send), which the cycle timers count.
+   */
+  size_t send( const size_t tid,
     const synindex syn_id,
     const size_t lcid,
     const std::vector< ConnectorModel* >& cm,
@@ -906,14 +910,14 @@ ConnectionManager::get_device_connected( const size_t tid, const size_t lcid ) c
   return target_table_devices_.is_device_connected( tid, lcid );
 }
 
-inline void
+inline size_t
 ConnectionManager::send( const size_t tid,
   const synindex syn_id,
   const size_t lcid,
   const std::vector< ConnectorModel* >& cm,
   Event& e )
 {
-  connections_[ tid ][ syn_id ]->send( tid, lcid, cm, e );
+  return connections_[ tid ][ syn_id ]->send( tid, lcid, cm, e );
 }
 
 inline void

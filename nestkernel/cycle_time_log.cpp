@@ -42,6 +42,9 @@ CycleTimeLog::CycleTimeLog()
   , gather_time_()
   , collocate_time_()
   , mpi_time_()
+  , deliver_connections_()
+  , spike_buffer_first_()
+  , spike_buffer_last_()
 {
 }
 
@@ -60,6 +63,9 @@ CycleTimeLog::clear()
   gather_time_.clear();
   collocate_time_.clear();
   mpi_time_.clear();
+  deliver_connections_.clear();
+  spike_buffer_first_.clear();
+  spike_buffer_last_.clear();
 }
 
 void
@@ -70,11 +76,12 @@ CycleTimeLog::add_entry( double cycle_update_time,
   double update_mean,
   double deliver_max,
   double deliver_mean,
-  double omp_max,
-  double omp_mean,
   double gather_time,
   double collocate_time,
-  double mpi_time )
+  double mpi_time,
+  long deliver_connections,
+  long spike_buffer_first,
+  long spike_buffer_last )
 {
   cycle_update_time_.emplace_back( cycle_update_time );
   communicate_time_.emplace_back( communicate_time );
@@ -83,11 +90,19 @@ CycleTimeLog::add_entry( double cycle_update_time,
   update_mean_.emplace_back( update_mean );
   deliver_max_.emplace_back( deliver_max );
   deliver_mean_.emplace_back( deliver_mean );
-  omp_max_.emplace_back( omp_max );
-  omp_mean_.emplace_back( omp_mean );
   gather_time_.emplace_back( gather_time );
   collocate_time_.emplace_back( collocate_time );
   mpi_time_.emplace_back( mpi_time );
+  deliver_connections_.emplace_back( deliver_connections );
+  spike_buffer_first_.emplace_back( spike_buffer_first );
+  spike_buffer_last_.emplace_back( spike_buffer_last );
+}
+
+void
+CycleTimeLog::add_omp_entry( double omp_max, double omp_mean )
+{
+  omp_max_.emplace_back( omp_max );
+  omp_mean_.emplace_back( omp_mean );
 }
 
 void
@@ -128,6 +143,16 @@ CycleTimeLog::to_dict( Dictionary& events ) const
 
   auto& mpi_time = events.get_or_create_vector< double >( names::phaselok_mpi );
   mpi_time.insert( mpi_time.end(), mpi_time_.begin(), mpi_time_.end() );
+
+  auto& deliver_connections = events.get_or_create_vector< long >( names::phaselok_deliver_connections );
+  deliver_connections.insert(
+    deliver_connections.end(), deliver_connections_.begin(), deliver_connections_.end() );
+
+  auto& spike_buffer_first = events.get_or_create_vector< long >( names::phaselok_spike_buffer_first );
+  spike_buffer_first.insert( spike_buffer_first.end(), spike_buffer_first_.begin(), spike_buffer_first_.end() );
+
+  auto& spike_buffer_last = events.get_or_create_vector< long >( names::phaselok_spike_buffer_last );
+  spike_buffer_last.insert( spike_buffer_last.end(), spike_buffer_last_.begin(), spike_buffer_last_.end() );
 }
 
 }

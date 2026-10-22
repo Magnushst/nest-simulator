@@ -52,6 +52,9 @@ EventDeliveryManager::EventDeliveryManager()
   , send_buffer_secondary_events_()
   , recv_buffer_secondary_events_()
   , local_spike_counter_()
+  , local_deliver_connections_()
+  , spike_buffer_first_( 0 )
+  , spike_buffer_last_( 0 )
   , send_buffer_spike_data_()
   , recv_buffer_spike_data_()
   , send_buffer_off_grid_spike_data_()
@@ -94,6 +97,9 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
 
   local_spike_counter_.resize( num_threads, 0 );
   reset_counters();
+#ifdef CYCLE_TIMERS
+  local_deliver_connections_.resize( num_threads, 0 );
+#endif
   emitted_spikes_register_.resize( num_threads );
   off_grid_emitted_spikes_register_.resize( num_threads );
   gather_completed_checker_.initialize( num_threads, false );
@@ -383,6 +389,10 @@ EventDeliveryManager::gather_spike_data_( std::vector< SpikeDataT >& send_buffer
     send_recv_buffer_resize_log_.add_entry( global_max_spikes_per_rank_, new_buff_size_per_rank );
   }
 
+#ifdef CYCLE_TIMERS
+  spike_buffer_first_ = kernel().mpi_manager.get_send_recv_count_spike_data_per_rank();
+#endif
+
   /* The following do-while loop is executed
    * - once if all spikes fit into current send buffers on all ranks
    * - twice if send buffer size needs to be increased to fit in all spikes
@@ -455,6 +465,10 @@ EventDeliveryManager::gather_spike_data_( std::vector< SpikeDataT >& send_buffer
     }
 
   } while ( not all_spikes_transmitted );
+
+#ifdef CYCLE_TIMERS
+  spike_buffer_last_ = kernel().mpi_manager.get_send_recv_count_spike_data_per_rank();
+#endif
 
   // We cannot shrink buffers here, because they first need to be read out by
   // deliver events. Shrinking will happen at beginning of next gather.
@@ -606,6 +620,9 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
 
   const size_t spike_buffer_size_per_rank = kernel().mpi_manager.get_send_recv_count_spike_data_per_rank();
   const std::vector< ConnectorModel* >& cm = kernel().model_manager.get_connection_models( tid );
+#ifdef CYCLE_TIMERS
+  size_t deliver_connections = 0;  // connections visited by this call, added to this thread's counter once
+#endif
 
   // prepare Time objects for every possible time stamp within min_delay_
   std::vector< Time > prepared_timestamps( kernel().connection_manager.get_min_delay() );
@@ -668,7 +685,10 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
         {
           if ( tid_batch[ j ] == tid )
           {
-            kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+#ifdef CYCLE_TIMERS
+            deliver_connections +=
+#endif
+              kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
           }
         }
       }
@@ -690,7 +710,10 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
       {
         if ( tid_batch[ j ] == tid )
         {
-          kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+#ifdef CYCLE_TIMERS
+          deliver_connections +=
+#endif
+            kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
         }
       }
     }
@@ -730,7 +753,10 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
         {
           if ( lcid_batch[ j ] != invalid_lcid )
           {
-            kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+#ifdef CYCLE_TIMERS
+            deliver_connections +=
+#endif
+              kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
           }
         }
       }
@@ -768,11 +794,18 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
       {
         if ( lcid_batch[ j ] != invalid_lcid )
         {
-          kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+#ifdef CYCLE_TIMERS
+          deliver_connections +=
+#endif
+            kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
         }
       }
     }  // if-else not compressed
   }  // for rank
+#ifdef CYCLE_TIMERS
+  // Only this thread writes its counter; the master reads it after the closing update barrier.
+  local_deliver_connections_[ tid ] += deliver_connections;
+#endif
 }
 
 
@@ -1103,6 +1136,24 @@ size_t
 EventDeliveryManager::get_local_spike_counter() const
 {
   return std::accumulate( local_spike_counter_.begin(), local_spike_counter_.end(), 0 );
+}
+
+size_t
+EventDeliveryManager::get_local_deliver_connections() const
+{
+  return std::accumulate( local_deliver_connections_.begin(), local_deliver_connections_.end(), size_t( 0 ) );
+}
+
+size_t
+EventDeliveryManager::get_spike_buffer_first() const
+{
+  return spike_buffer_first_;
+}
+
+size_t
+EventDeliveryManager::get_spike_buffer_last() const
+{
+  return spike_buffer_last_;
 }
 #endif
 

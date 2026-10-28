@@ -79,11 +79,14 @@ def build(window, min_delay_steps=1, compressed=True, cross_extra_steps=0, short
     nest.Connect(drive, neurons, syn_spec={"weight": 30.0, "delay": 0.1 * min_delay_steps})
     nest.Connect(neurons, recorder)
     sources, targets, weights, delays = connectivity(min_delay_steps, cross_extra_steps, short_cross_steps)
+    ids = np.array(neurons.tolist())
+    assert np.array_equal(ids, np.arange(1, N + 1))  # node_process() assumes the neurons are nodes 1 to N
     if plastic:
         syn_spec = {"synapse_model": "stdp_synapse", "weight": np.abs(weights), "Wmax": 1000.0, "delay": 0.1 * delays}
     else:
-        syn_spec = {"weight": weights, "delay": 0.1 * delays}
-    nest.Connect(neurons[sources - 1], neurons[targets - 1], "one_to_one", syn_spec)
+        syn_spec = {"synapse_model": "static_synapse", "weight": weights, "delay": 0.1 * delays}
+    # node id arrays with repeated ids: NEST's array form of one-to-one Connect
+    nest.Connect(ids[sources - 1], ids[targets - 1], "one_to_one", syn_spec)
     return recorder
 
 

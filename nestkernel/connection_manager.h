@@ -298,6 +298,13 @@ public:
    */
   long get_max_delay() const;
 
+  /**
+   * EXPERIMENTAL, NOT STOCK NEST: the smallest delay, in steps, over all processes, of any connection whose source is
+   * on another process. Collective. Stops if the source table is not kept, or if a synapse model other than
+   * static_synapse and its variants has connections.
+   */
+  long get_min_delay_between_ranks();
+
   bool get_user_set_delay_extrema() const;
 
   /**

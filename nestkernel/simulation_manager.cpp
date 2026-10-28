@@ -563,6 +563,8 @@ nest::SimulationManager::prepare()
 
   if ( kernel().node_manager.have_nodes_changed() or kernel().connection_manager.connections_have_changed() )
   {
+    // EXPERIMENTAL, NOT STOCK NEST: the windowed remote exchange checks the delays between processes again.
+    kernel().event_delivery_manager.invalidate_min_delay_between_ranks();
 #pragma omp parallel
     {
       const size_t tid = kernel().vp_manager.get_thread_id();
@@ -625,6 +627,9 @@ nest::SimulationManager::run( Time const& t )
     LOG( VerbosityLevel::ERROR, "SimulationManager::run", msg );
     throw KernelException();
   }
+
+  // EXPERIMENTAL, NOT STOCK NEST: stop unless the windowed remote exchange is exact for this network.
+  kernel().event_delivery_manager.check_remote_exchange_window();
 
   to_do_ += t.get_steps();
   to_do_total_ = to_do_;

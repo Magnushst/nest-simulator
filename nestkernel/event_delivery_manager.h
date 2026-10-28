@@ -51,6 +51,7 @@ namespace nest
 typedef MPIManager::OffGridSpike OffGridSpike;
 
 class TargetData;
+class ConnectorModel;
 class SendBufferPosition;
 class TargetSendBufferPosition;
 
@@ -218,6 +219,20 @@ public:
   void deliver_events( const size_t tid );
 
   /**
+   * EXPERIMENTAL, NOT STOCK NEST: stop the run unless the windowed remote exchange is exact for this network.
+   *
+   * With remote_exchange_slices W > 1, every connection whose source is on another process needs a delay of at least
+   * W slices of min_delay steps. The smallest such delay over all processes is computed again after every change of
+   * the connections. Called at the start of every Run.
+   */
+  void check_remote_exchange_window();
+
+  /**
+   * EXPERIMENTAL, NOT STOCK NEST: the connections have changed, so the smallest delay between processes is unknown.
+   */
+  void invalidate_min_delay_between_ranks();
+
+  /**
    * Collocates presynaptic connection information for secondary events (MPI
    * buffer offsets), communicates via MPI and create presynaptic connection
    * infrastructure for secondary events.
@@ -348,9 +363,34 @@ private:
   /**
    * Reads spikes from MPI buffers and delivers them to ringbuffer of
    * nodes.
+   *
+   * The spikes were emitted in the window_steps steps before the current slice: min_delay steps, or, for a window's
+   * spikes from other processes, remote_exchange_slices * min_delay steps (EXPERIMENTAL, NOT STOCK NEST).
    */
   template < typename SpikeDataT >
-  void deliver_events_( const size_t tid, const std::vector< SpikeDataT >& recv_buffer );
+  void deliver_events_( const size_t tid, const std::vector< SpikeDataT >& recv_buffer, const long window_steps );
+
+  /**
+   * Delivers num_spikes spikes, the i-th given by get_spike_data( i ), to their targets on thread tid, in batches.
+   * Returns the number of connections visited (counted with cycle timers only, zero otherwise).
+   */
+  template < typename GetSpikeDataT >
+  size_t deliver_spike_batches_( const size_t tid,
+    const size_t num_spikes,
+    GetSpikeDataT get_spike_data,
+    const std::vector< Time >& prepared_timestamps,
+    const std::vector< ConnectorModel* >& cm );
+
+  /**
+   * EXPERIMENTAL, NOT STOCK NEST: delivers the last slice's spikes for this process, which the windowed remote
+   * exchange keeps out of MPI.
+   */
+  void deliver_local_events_( const size_t tid );
+
+  /**
+   * EXPERIMENTAL, NOT STOCK NEST: the windowed remote exchange's gather at the end of each slice.
+   */
+  void gather_spike_data_windowed_();
 
   /**
    * Deletes all spikes from spike registers and resets spike
@@ -510,6 +550,20 @@ private:
   Stopwatch< StopwatchGranularity::Detailed, StopwatchParallelism::MasterOnly > sw_collocate_spike_data_;
   Stopwatch< StopwatchGranularity::Detailed, StopwatchParallelism::MasterOnly > sw_communicate_spike_data_;
   Stopwatch< StopwatchGranularity::Detailed, StopwatchParallelism::MasterOnly > sw_communicate_target_data_;
+
+  // EXPERIMENTAL, NOT STOCK NEST: the windowed remote exchange (remote_exchange_slices > 1).
+  //! Spikes are exchanged with other processes every this many slices; 1 is stock NEST.
+  size_t remote_exchange_slices_;
+  //! Index of the current slice in its exchange window, 0 to remote_exchange_slices_ - 1.
+  size_t window_slice_;
+  //! Whether the receive buffer holds the spikes of the window that has just ended, to be delivered in this slice.
+  bool deliver_window_;
+  //! Smallest delay, in steps, of any connection whose source is on another process; -1 when not known.
+  long min_delay_between_ranks_;
+  //! Spikes for other processes, per writing thread, held until the window ends; their lag counts from its start.
+  std::vector< std::vector< SpikeDataWithRank >* > window_spikes_register_;
+  //! Spikes for this process from the slice that has just ended, per writing thread, delivered in the next slice.
+  std::vector< std::vector< SpikeDataWithRank >* > local_spikes_to_deliver_;
 };
 
 inline void

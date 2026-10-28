@@ -107,12 +107,21 @@ EventDeliveryManager::send_remote( size_t tid, SpikeEvent& e, const long lag )
   const size_t lid = kernel().vp_manager.node_id_to_lid( e.get_sender().get_node_id() );
   const auto& targets = kernel().connection_manager.get_remote_targets_of_local_node( tid, lid );
 
+  // EXPERIMENTAL, NOT STOCK NEST: with remote_exchange_slices > 1, spikes for other processes wait in the window
+  // register, their lag counted from the window's start; spikes for this process are delivered every slice.
+  const bool windowed = remote_exchange_slices_ > 1;
+  const size_t own_rank = kernel().mpi_manager.get_rank();
+  const long window_lag = static_cast< long >( window_slice_ ) * kernel().connection_manager.get_min_delay() + lag;
+
   for ( const auto& target : targets )
   {
+    const bool hold = windowed and target.get_rank() != own_rank;
+    std::vector< SpikeDataWithRank >& spike_register =
+      hold ? *window_spikes_register_[ tid ] : *emitted_spikes_register_[ tid ];
     // Unroll spike multiplicity as plastic synapses only handle individual spikes.
     for ( size_t i = 0; i < e.get_multiplicity(); ++i )
     {
-      ( *emitted_spikes_register_[ tid ] ).emplace_back( target, lag, e.is_flush_event() );
+      spike_register.emplace_back( target, hold ? window_lag : lag, e.is_flush_event() );
     }
   }
 }

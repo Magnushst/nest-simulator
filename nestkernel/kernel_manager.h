@@ -136,6 +136,9 @@
                                                      (1 + spike_buffer_shrink_spare) * required_buffer_size`.
                                                      See `spike_buffer_shrink_limit` for when buffers shrink.
                                                      Defaults to 0.1.
+ remote_exchange_slices                integertype - EXPERIMENTAL, NOT STOCK NEST: exchange spikes with other processes
+                                                     every this many slices of min_delay steps; every connection
+                                                     between processes needs at least that delay. Defaults to 1.
  spike_buffer_resize_log               dict        - Information on spike buffer resizing as dictionary. It contains the
                                                      times of the resizings (simulation clock in steps, always multiple
                                                      of min_delay), global_max_spikes_sent, that is, the observed spike

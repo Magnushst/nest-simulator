@@ -466,6 +466,7 @@ const std::string refractory_input( "refractory_input" );
 const std::string registered( "registered" );
 const std::string regular_spike_arrival( "regular_spike_arrival" );
 const std::string relative_amplitude( "relative_amplitude" );
+const std::string remote_exchange_slices( "remote_exchange_slices" );
 const std::string requires_symmetric( "requires_symmetric" );
 const std::string reset_pattern( "reset_pattern" );
 const std::string resolution( "resolution" );

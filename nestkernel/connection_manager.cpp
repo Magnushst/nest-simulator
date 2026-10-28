@@ -1065,6 +1065,56 @@ nest::ConnectionManager::get_num_connections() const
   return num_connections;
 }
 
+long
+nest::ConnectionManager::get_min_delay_between_ranks()
+{
+  // EXPERIMENTAL, NOT STOCK NEST: for the windowed remote exchange (EventDeliveryManager::check_remote_exchange_window).
+  if ( not keep_source_table_ )
+  {
+    throw KernelException( "remote_exchange_slices > 1 needs keep_source_table." );
+  }
+
+  const size_t num_vps = kernel().vp_manager.get_num_virtual_processes();
+  const size_t num_processes = kernel().mpi_manager.get_num_processes();
+  const size_t own_rank = kernel().mpi_manager.get_rank();
+  std::vector< long > min_delay_per_thread( kernel().vp_manager.get_num_threads(), std::numeric_limits< long >::max() );
+  std::vector< int > only_static_per_thread( kernel().vp_manager.get_num_threads(), 1 );
+
+#pragma omp parallel
+  {
+    const size_t tid = kernel().vp_manager.get_thread_id();
+    std::vector< BlockVector< Source > >& sources = source_table_.get_thread_local_sources( tid );
+    for ( synindex syn_id = 0; syn_id < connections_[ tid ].size() and syn_id < sources.size(); ++syn_id )
+    {
+      if ( connections_[ tid ][ syn_id ] and connections_[ tid ][ syn_id ]->size() > 0 )
+      {
+        if ( kernel().model_manager.get_connection_model( syn_id, tid ).get_name().compare( 0, 14, "static_synapse" ) != 0 )
+        {
+          only_static_per_thread[ tid ] = 0;
+        }
+        min_delay_per_thread[ tid ] = std::min( min_delay_per_thread[ tid ],
+          connections_[ tid ][ syn_id ]->get_min_delay_steps_from_other_ranks(
+            sources[ syn_id ], num_vps, num_processes, own_rank ) );
+      }
+    }
+  }  // of omp parallel
+
+  const bool only_static =
+    std::all_of( only_static_per_thread.begin(), only_static_per_thread.end(), []( int s ) { return s == 1; } );
+  if ( kernel().mpi_manager.any_true( not only_static ) )
+  {
+    throw KernelException( "remote_exchange_slices > 1 is implemented for static_synapse and its variants only." );
+  }
+
+  std::vector< long > min_delays( num_processes, std::numeric_limits< long >::max() );
+  min_delays[ own_rank ] = *std::min_element( min_delay_per_thread.begin(), min_delay_per_thread.end() );
+  if ( num_processes > 1 )
+  {
+    kernel().mpi_manager.communicate( min_delays );
+  }
+  return *std::min_element( min_delays.begin(), min_delays.end() );
+}
+
 size_t
 nest::ConnectionManager::get_num_connections( const synindex syn_id ) const
 {

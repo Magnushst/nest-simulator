@@ -27,7 +27,9 @@
 #include "config.h"
 
 // C++ includes:
+#include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <vector>
 
 // Includes from libnestutil:
@@ -175,6 +177,15 @@ public:
    * Sort connections according to source node IDs.
    */
   virtual void sort_connections( BlockVector< Source >& ) = 0;
+
+  /**
+   * EXPERIMENTAL, NOT STOCK NEST: the smallest delay, in steps, of the enabled connections whose source is on another
+   * process; the largest long if there is none. sources holds the connections' sources, in the same order.
+   */
+  virtual long get_min_delay_steps_from_other_ranks( const BlockVector< Source >& sources,
+    const size_t num_vps,
+    const size_t num_processes,
+    const size_t own_rank ) const = 0;
 
   /**
    * Set a flag in the connection indicating whether the following
@@ -463,6 +474,27 @@ public:
   sort_connections( BlockVector< Source >& sources ) override
   {
     nest::sort( sources, C_ );
+  }
+
+  long
+  get_min_delay_steps_from_other_ranks( const BlockVector< Source >& sources,
+    const size_t num_vps,
+    const size_t num_processes,
+    const size_t own_rank ) const override
+  {
+    assert( sources.size() == C_.size() );
+    long min_delay = std::numeric_limits< long >::max();
+    auto source = sources.begin();
+    for ( const auto& connection : C_ )
+    {
+      // a node's process, as MPIManager::get_process_id_of_node_id computes it
+      if ( not connection.is_disabled() and source->get_node_id() % num_vps % num_processes != own_rank )
+      {
+        min_delay = std::min( min_delay, connection.get_delay_steps() );
+      }
+      ++source;
+    }
+    return min_delay;
   }
 
   void

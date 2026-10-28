@@ -235,6 +235,16 @@ class NestModule(types.ModuleType):
         "Maximal size of MPI buffers for communication of connections",
         default=16777216,
     )
+    remote_exchange_slices = KernelAttribute(
+        "int",
+        (
+            "EXPERIMENTAL, NOT STOCK NEST: exchange spikes with other MPI processes every this many slices of "
+            + "`min_delay` steps; spikes for the own process are delivered every slice. Every connection between "
+            + "processes needs a delay of at least this many slices, which is checked before each run. Can be "
+            + "changed only before the first simulation"
+        ),
+        default=1,
+    )
     spike_buffer_grow_extra = KernelAttribute(
         "float",
         "When spike exchange buffer is expanded, resize it to "

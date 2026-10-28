@@ -27,6 +27,7 @@
 #include <numeric>    // accumulate
 
 // Includes from nestkernel:
+#include "compose.hpp"
 #include "connection_manager.h"
 #include "connection_manager_impl.h"
 #include "event_delivery_manager_impl.h"
@@ -68,6 +69,12 @@ EventDeliveryManager::EventDeliveryManager()
   , send_recv_buffer_grow_extra_( 0.5 )
   , send_recv_buffer_resize_log_()
   , gather_completed_checker_()
+  , remote_exchange_slices_( 1 )
+  , window_slice_( 0 )
+  , deliver_window_( false )
+  , min_delay_between_ranks_( -1 )
+  , window_spikes_register_()
+  , local_spikes_to_deliver_()
 {
 }
 
@@ -91,6 +98,12 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
     send_recv_buffer_shrink_spare_ = 0.1;
     send_recv_buffer_grow_extra_ = 0.5;
     send_recv_buffer_resize_log_.clear();
+
+    // EXPERIMENTAL, NOT STOCK NEST: the windowed remote exchange starts as stock NEST.
+    remote_exchange_slices_ = 1;
+    window_slice_ = 0;
+    deliver_window_ = false;
+    min_delay_between_ranks_ = -1;
   }
 
   const size_t num_threads = kernel().vp_manager.get_num_threads();
@@ -102,6 +115,8 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
 #endif
   emitted_spikes_register_.resize( num_threads );
   off_grid_emitted_spikes_register_.resize( num_threads );
+  window_spikes_register_.resize( num_threads );
+  local_spikes_to_deliver_.resize( num_threads );
   gather_completed_checker_.initialize( num_threads, false );
 
 #pragma omp parallel
@@ -116,6 +131,16 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
     if ( not off_grid_emitted_spikes_register_[ tid ] )
     {
       off_grid_emitted_spikes_register_[ tid ] = new std::vector< OffGridSpikeDataWithRank >();
+    }
+
+    if ( not window_spikes_register_[ tid ] )
+    {
+      window_spikes_register_[ tid ] = new std::vector< SpikeDataWithRank >();
+    }
+
+    if ( not local_spikes_to_deliver_[ tid ] )
+    {
+      local_spikes_to_deliver_[ tid ] = new std::vector< SpikeDataWithRank >();
     }
   }  // of omp parallel
 }
@@ -135,6 +160,18 @@ EventDeliveryManager::finalize( const bool )
     delete vec_spikedata_ptr;
   }
   off_grid_emitted_spikes_register_.clear();
+
+  for ( auto& vec_spikedata_ptr : window_spikes_register_ )
+  {
+    delete vec_spikedata_ptr;
+  }
+  window_spikes_register_.clear();
+
+  for ( auto& vec_spikedata_ptr : local_spikes_to_deliver_ )
+  {
+    delete vec_spikedata_ptr;
+  }
+  local_spikes_to_deliver_.clear();
 
   send_buffer_secondary_events_.clear();
   recv_buffer_secondary_events_.clear();
@@ -179,6 +216,22 @@ EventDeliveryManager::set_status( const Dictionary& dict )
     }
     send_recv_buffer_grow_extra_ = bge;
   }
+
+  // EXPERIMENTAL, NOT STOCK NEST
+  long res = static_cast< long >( remote_exchange_slices_ );
+  if ( dict.update_value( names::remote_exchange_slices, res ) )
+  {
+    if ( res < 1 )
+    {
+      throw BadProperty( "remote_exchange_slices >= 1 required." );
+    }
+    if ( static_cast< size_t >( res ) != remote_exchange_slices_
+      and ( kernel().simulation_manager.has_been_simulated() or kernel().simulation_manager.has_been_prepared() ) )
+    {
+      throw BadProperty( "remote_exchange_slices can only be changed before the first simulation." );
+    }
+    remote_exchange_slices_ = static_cast< size_t >( res );
+  }
 }
 
 void
@@ -189,6 +242,7 @@ EventDeliveryManager::get_status( Dictionary& dict )
   dict[ names::spike_buffer_shrink_limit ] = send_recv_buffer_shrink_limit_;
   dict[ names::spike_buffer_shrink_spare ] = send_recv_buffer_shrink_spare_;
   dict[ names::spike_buffer_grow_extra ] = send_recv_buffer_grow_extra_;
+  dict[ names::remote_exchange_slices ] = static_cast< long >( remote_exchange_slices_ );
 
   Dictionary log_events;
   send_recv_buffer_resize_log_.to_dict( log_events );
@@ -363,10 +417,48 @@ EventDeliveryManager::gather_spike_data()
   {
     gather_spike_data_( send_buffer_off_grid_spike_data_, recv_buffer_off_grid_spike_data_ );
   }
+  else if ( remote_exchange_slices_ > 1 )
+  {
+    gather_spike_data_windowed_();
+  }
   else
   {
     gather_spike_data_( send_buffer_spike_data_, recv_buffer_spike_data_ );
   }
+}
+
+void
+EventDeliveryManager::gather_spike_data_windowed_()
+{
+  // EXPERIMENTAL, NOT STOCK NEST. The master thread calls this at the end of each slice, between barriers.
+  //
+  // The spikes for this process registered in this slice are delivered at the start of the next slice, without MPI.
+  // The vectors they replace hold the previous slice's, delivered at the start of this one; each thread clears its
+  // own before it registers spikes again (reset_spike_register_).
+  std::swap( emitted_spikes_register_, local_spikes_to_deliver_ );
+  deliver_window_ = false;
+#ifdef CYCLE_TIMERS
+  spike_buffer_first_ = 0;
+  spike_buffer_last_ = 0;
+#endif
+
+  if ( window_slice_ + 1 < remote_exchange_slices_ )
+  {
+    ++window_slice_;
+    return;
+  }
+
+  // The window ends: its spikes for other processes go out in one all-to-all, through NEST's own gather. The delivered
+  // vectors become the next window's register, so they are cleared first; the window's vectors become the register
+  // that each thread clears and refills in the next slice.
+  for ( auto& spikes : emitted_spikes_register_ )
+  {
+    spikes->clear();
+  }
+  std::swap( emitted_spikes_register_, window_spikes_register_ );
+  gather_spike_data_( send_buffer_spike_data_, recv_buffer_spike_data_ );
+  deliver_window_ = true;
+  window_slice_ = 0;
 }
 
 template < typename SpikeDataT >
@@ -597,20 +689,198 @@ EventDeliveryManager::get_global_max_spikes_per_rank_( const SendBufferPosition&
 void
 EventDeliveryManager::deliver_events( const size_t tid )
 {
+  const long min_delay = kernel().connection_manager.get_min_delay();
   if ( off_grid_spiking_ )
   {
-    deliver_events_( tid, recv_buffer_off_grid_spike_data_ );
+    deliver_events_( tid, recv_buffer_off_grid_spike_data_, min_delay );
+  }
+  else if ( remote_exchange_slices_ > 1 )
+  {
+    // EXPERIMENTAL, NOT STOCK NEST: the spikes from other processes of the window that has just ended, if one has,
+    // then the last slice's spikes for this process.
+    if ( deliver_window_ )
+    {
+      deliver_events_( tid, recv_buffer_spike_data_, static_cast< long >( remote_exchange_slices_ ) * min_delay );
+    }
+    deliver_local_events_( tid );
   }
   else
   {
-    deliver_events_( tid, recv_buffer_spike_data_ );
+    deliver_events_( tid, recv_buffer_spike_data_, min_delay );
   }
   reset_spike_register_( tid );
 }
 
+template < typename GetSpikeDataT >
+size_t
+EventDeliveryManager::deliver_spike_batches_( const size_t tid,
+  const size_t num_spikes,
+  GetSpikeDataT get_spike_data,
+  const std::vector< Time >& prepared_timestamps,
+  const std::vector< ConnectorModel* >& cm )
+{
+#ifdef CYCLE_TIMERS
+  size_t deliver_connections = 0;  // connections visited by this call
+#endif
+
+  // For each batch, extract data first from the spike data into value-specific arrays, then deliver from these arrays
+  constexpr size_t SPIKES_PER_BATCH = 8;
+  const size_t num_batches = num_spikes / SPIKES_PER_BATCH;
+  const size_t num_remaining_entries = num_spikes - num_batches * SPIKES_PER_BATCH;
+
+  SpikeEvent se_batch[ SPIKES_PER_BATCH ];
+  size_t tid_batch[ SPIKES_PER_BATCH ];
+  size_t syn_id_batch[ SPIKES_PER_BATCH ];
+  size_t lcid_batch[ SPIKES_PER_BATCH ];
+
+  if ( not kernel().connection_manager.use_compressed_spikes() )
+  {
+    for ( size_t i = 0; i < num_batches; ++i )
+    {
+      for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
+      {
+        const auto& spike_data = get_spike_data( i * SPIKES_PER_BATCH + j );
+        se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
+        se_batch[ j ].set_offset( spike_data.get_offset() );
+        se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
+        tid_batch[ j ] = spike_data.get_tid();
+        syn_id_batch[ j ] = spike_data.get_syn_id();
+        lcid_batch[ j ] = spike_data.get_lcid();
+        se_batch[ j ].set_sender_node_id_info( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ] );
+      }
+      for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
+      {
+        if ( tid_batch[ j ] == tid )
+        {
+#ifdef CYCLE_TIMERS
+          deliver_connections +=
+#endif
+            kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+        }
+      }
+    }
+
+    // Processed all regular-sized batches, now do remainder
+    for ( size_t j = 0; j < num_remaining_entries; ++j )
+    {
+      const auto& spike_data =
+        get_spike_data( num_batches * SPIKES_PER_BATCH + j );
+      se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
+      se_batch[ j ].set_offset( spike_data.get_offset() );
+      se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
+      tid_batch[ j ] = spike_data.get_tid();
+      syn_id_batch[ j ] = spike_data.get_syn_id();
+      lcid_batch[ j ] = spike_data.get_lcid();
+      se_batch[ j ].set_sender_node_id_info( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ] );
+    }
+    for ( size_t j = 0; j < num_remaining_entries; ++j )
+    {
+      if ( tid_batch[ j ] == tid )
+      {
+#ifdef CYCLE_TIMERS
+        deliver_connections +=
+#endif
+          kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+      }
+    }
+  }
+  else  // compressed spikes
+  {
+    for ( size_t i = 0; i < num_batches; ++i )
+    {
+      for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
+      {
+        const auto& spike_data = get_spike_data( i * SPIKES_PER_BATCH + j );
+
+        se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
+        se_batch[ j ].set_offset( spike_data.get_offset() );
+        se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
+        syn_id_batch[ j ] = spike_data.get_syn_id();
+        // for compressed spikes lcid holds the index in the
+        // compressed_spike_data structure
+        lcid_batch[ j ] = spike_data.get_lcid();
+      }
+      for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
+      {
+        // find the spike-data entry for this thread
+        const std::vector< SpikeData >& compressed_spike_data =
+          kernel().connection_manager.get_compressed_spike_data( syn_id_batch[ j ], lcid_batch[ j ] );
+        lcid_batch[ j ] = compressed_spike_data[ tid ].get_lcid();
+      }
+      for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
+      {
+        if ( lcid_batch[ j ] != invalid_lcid )
+        {
+          // non-local sender -> receiver retrieves ID of sender Node from SourceTable based on tid, syn_id, lcid
+          // only if needed, as this is computationally costly
+          se_batch[ j ].set_sender_node_id_info( tid, syn_id_batch[ j ], lcid_batch[ j ] );
+        }
+      }
+      for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
+      {
+        if ( lcid_batch[ j ] != invalid_lcid )
+        {
+#ifdef CYCLE_TIMERS
+          deliver_connections +=
+#endif
+            kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+        }
+      }
+    }
+
+    // Processed all regular-sized batches, now do remainder
+    for ( size_t j = 0; j < num_remaining_entries; ++j )
+    {
+      const auto& spike_data =
+        get_spike_data( num_batches * SPIKES_PER_BATCH + j );
+      se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
+      se_batch[ j ].set_offset( spike_data.get_offset() );
+      se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
+      syn_id_batch[ j ] = spike_data.get_syn_id();
+      // for compressed spikes lcid holds the index in the
+      // compressed_spike_data structure
+      lcid_batch[ j ] = spike_data.get_lcid();
+    }
+    for ( size_t j = 0; j < num_remaining_entries; ++j )
+    {
+      // find the spike-data entry for this thread
+      const std::vector< SpikeData >& compressed_spike_data =
+        kernel().connection_manager.get_compressed_spike_data( syn_id_batch[ j ], lcid_batch[ j ] );
+      lcid_batch[ j ] = compressed_spike_data[ tid ].get_lcid();
+    }
+    for ( size_t j = 0; j < num_remaining_entries; ++j )
+    {
+      if ( lcid_batch[ j ] != invalid_lcid )
+      {
+        // non-local sender -> receiver retrieves ID of sender Node from SourceTable based on tid, syn_id, lcid
+        // only if needed, as this is computationally costly
+        se_batch[ j ].set_sender_node_id_info( tid, syn_id_batch[ j ], lcid_batch[ j ] );
+      }
+    }
+    for ( size_t j = 0; j < num_remaining_entries; ++j )
+    {
+      if ( lcid_batch[ j ] != invalid_lcid )
+      {
+#ifdef CYCLE_TIMERS
+        deliver_connections +=
+#endif
+          kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
+      }
+    }
+  }  // if-else not compressed
+
+#ifdef CYCLE_TIMERS
+  return deliver_connections;
+#else
+  return 0;
+#endif
+}
+
 template < typename SpikeDataT >
 void
-EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< SpikeDataT >& recv_buffer )
+EventDeliveryManager::deliver_events_( const size_t tid,
+  const std::vector< SpikeDataT >& recv_buffer,
+  const long window_steps )
 {
   // deliver only at beginning of time slice
   if ( kernel().simulation_manager.get_from_step() > 0 )
@@ -624,13 +894,13 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
   size_t deliver_connections = 0;  // connections visited by this call, added to this thread's counter once
 #endif
 
-  // prepare Time objects for every possible time stamp within min_delay_
-  std::vector< Time > prepared_timestamps( kernel().connection_manager.get_min_delay() );
-  for ( size_t lag = 0; lag < static_cast< size_t >( kernel().connection_manager.get_min_delay() ); ++lag )
+  // prepare Time objects for every possible time stamp within window_steps (min_delay_ unless windowed)
+  std::vector< Time > prepared_timestamps( window_steps );
+  for ( long lag = 0; lag < window_steps; ++lag )
   {
-    // Subtract min_delay because spikes were emitted in previous time slice and we use current clock.
-    prepared_timestamps[ lag ] =
-      kernel().simulation_manager.get_clock() + Time::step( lag + 1 - kernel().connection_manager.get_min_delay() );
+    // Subtract window_steps because spikes were emitted in the previous time slice (or window) and we use current
+    // clock.
+    prepared_timestamps[ lag ] = kernel().simulation_manager.get_clock() + Time::step( lag + 1 - window_steps );
   }
 
   // Deliver spikes sent by each rank in order
@@ -656,151 +926,15 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
       }
     }
 
-    // For each batch, extract data first from receive buffer into value-specific arrays, then deliver from these arrays
-    constexpr size_t SPIKES_PER_BATCH = 8;
-    const size_t num_batches = num_spikes_received / SPIKES_PER_BATCH;
-    const size_t num_remaining_entries = num_spikes_received - num_batches * SPIKES_PER_BATCH;
-
-    SpikeEvent se_batch[ SPIKES_PER_BATCH ];
-    size_t tid_batch[ SPIKES_PER_BATCH ];
-    size_t syn_id_batch[ SPIKES_PER_BATCH ];
-    size_t lcid_batch[ SPIKES_PER_BATCH ];
-
-    if ( not kernel().connection_manager.use_compressed_spikes() )
-    {
-      for ( size_t i = 0; i < num_batches; ++i )
-      {
-        for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
-        {
-          const SpikeDataT& spike_data = recv_buffer[ rank * spike_buffer_size_per_rank + i * SPIKES_PER_BATCH + j ];
-          se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
-          se_batch[ j ].set_offset( spike_data.get_offset() );
-          se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
-          tid_batch[ j ] = spike_data.get_tid();
-          syn_id_batch[ j ] = spike_data.get_syn_id();
-          lcid_batch[ j ] = spike_data.get_lcid();
-          se_batch[ j ].set_sender_node_id_info( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ] );
-        }
-        for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
-        {
-          if ( tid_batch[ j ] == tid )
-          {
 #ifdef CYCLE_TIMERS
-            deliver_connections +=
+    deliver_connections +=
 #endif
-              kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
-          }
-        }
-      }
-
-      // Processed all regular-sized batches, now do remainder
-      for ( size_t j = 0; j < num_remaining_entries; ++j )
-      {
-        const SpikeDataT& spike_data =
-          recv_buffer[ rank * spike_buffer_size_per_rank + num_batches * SPIKES_PER_BATCH + j ];
-        se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
-        se_batch[ j ].set_offset( spike_data.get_offset() );
-        se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
-        tid_batch[ j ] = spike_data.get_tid();
-        syn_id_batch[ j ] = spike_data.get_syn_id();
-        lcid_batch[ j ] = spike_data.get_lcid();
-        se_batch[ j ].set_sender_node_id_info( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ] );
-      }
-      for ( size_t j = 0; j < num_remaining_entries; ++j )
-      {
-        if ( tid_batch[ j ] == tid )
-        {
-#ifdef CYCLE_TIMERS
-          deliver_connections +=
-#endif
-            kernel().connection_manager.send( tid_batch[ j ], syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
-        }
-      }
-    }
-    else  // compressed spikes
-    {
-      for ( size_t i = 0; i < num_batches; ++i )
-      {
-        for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
-        {
-          const SpikeDataT& spike_data = recv_buffer[ rank * spike_buffer_size_per_rank + i * SPIKES_PER_BATCH + j ];
-
-          se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
-          se_batch[ j ].set_offset( spike_data.get_offset() );
-          se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
-          syn_id_batch[ j ] = spike_data.get_syn_id();
-          // for compressed spikes lcid holds the index in the
-          // compressed_spike_data structure
-          lcid_batch[ j ] = spike_data.get_lcid();
-        }
-        for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
-        {
-          // find the spike-data entry for this thread
-          const std::vector< SpikeData >& compressed_spike_data =
-            kernel().connection_manager.get_compressed_spike_data( syn_id_batch[ j ], lcid_batch[ j ] );
-          lcid_batch[ j ] = compressed_spike_data[ tid ].get_lcid();
-        }
-        for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
-        {
-          if ( lcid_batch[ j ] != invalid_lcid )
-          {
-            // non-local sender -> receiver retrieves ID of sender Node from SourceTable based on tid, syn_id, lcid
-            // only if needed, as this is computationally costly
-            se_batch[ j ].set_sender_node_id_info( tid, syn_id_batch[ j ], lcid_batch[ j ] );
-          }
-        }
-        for ( size_t j = 0; j < SPIKES_PER_BATCH; ++j )
-        {
-          if ( lcid_batch[ j ] != invalid_lcid )
-          {
-#ifdef CYCLE_TIMERS
-            deliver_connections +=
-#endif
-              kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
-          }
-        }
-      }
-
-      // Processed all regular-sized batches, now do remainder
-      for ( size_t j = 0; j < num_remaining_entries; ++j )
-      {
-        const SpikeDataT& spike_data =
-          recv_buffer[ rank * spike_buffer_size_per_rank + num_batches * SPIKES_PER_BATCH + j ];
-        se_batch[ j ].set_stamp( prepared_timestamps[ spike_data.get_lag() ] );
-        se_batch[ j ].set_offset( spike_data.get_offset() );
-        se_batch[ j ].set_flush_event_flag( spike_data.is_flush_event() );
-        syn_id_batch[ j ] = spike_data.get_syn_id();
-        // for compressed spikes lcid holds the index in the
-        // compressed_spike_data structure
-        lcid_batch[ j ] = spike_data.get_lcid();
-      }
-      for ( size_t j = 0; j < num_remaining_entries; ++j )
-      {
-        // find the spike-data entry for this thread
-        const std::vector< SpikeData >& compressed_spike_data =
-          kernel().connection_manager.get_compressed_spike_data( syn_id_batch[ j ], lcid_batch[ j ] );
-        lcid_batch[ j ] = compressed_spike_data[ tid ].get_lcid();
-      }
-      for ( size_t j = 0; j < num_remaining_entries; ++j )
-      {
-        if ( lcid_batch[ j ] != invalid_lcid )
-        {
-          // non-local sender -> receiver retrieves ID of sender Node from SourceTable based on tid, syn_id, lcid
-          // only if needed, as this is computationally costly
-          se_batch[ j ].set_sender_node_id_info( tid, syn_id_batch[ j ], lcid_batch[ j ] );
-        }
-      }
-      for ( size_t j = 0; j < num_remaining_entries; ++j )
-      {
-        if ( lcid_batch[ j ] != invalid_lcid )
-        {
-#ifdef CYCLE_TIMERS
-          deliver_connections +=
-#endif
-            kernel().connection_manager.send( tid, syn_id_batch[ j ], lcid_batch[ j ], cm, se_batch[ j ] );
-        }
-      }
-    }  // if-else not compressed
+      deliver_spike_batches_(
+        tid,
+        num_spikes_received,
+        [ & ]( const size_t i ) -> const SpikeDataT& { return recv_buffer[ rank * spike_buffer_size_per_rank + i ]; },
+        prepared_timestamps,
+        cm );
   }  // for rank
 #ifdef CYCLE_TIMERS
   // Only this thread writes its counter; the master reads it after the closing update barrier.
@@ -808,6 +942,90 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
 #endif
 }
 
+
+void
+EventDeliveryManager::deliver_local_events_( const size_t tid )
+{
+  // EXPERIMENTAL, NOT STOCK NEST: the windowed remote exchange delivers the last slice's spikes for this process here,
+  // where stock NEST delivers them from this process's own section of the receive buffer.
+  if ( kernel().simulation_manager.get_from_step() > 0 )
+  {
+    return;
+  }
+
+  const long min_delay = kernel().connection_manager.get_min_delay();
+  const std::vector< ConnectorModel* >& cm = kernel().model_manager.get_connection_models( tid );
+  std::vector< Time > prepared_timestamps( min_delay );
+  for ( long lag = 0; lag < min_delay; ++lag )
+  {
+    // Subtract min_delay because spikes were emitted in previous time slice and we use current clock.
+    prepared_timestamps[ lag ] = kernel().simulation_manager.get_clock() + Time::step( lag + 1 - min_delay );
+  }
+
+#ifdef CYCLE_TIMERS
+  size_t deliver_connections = 0;  // connections visited by this call, added to this thread's counter once
+#endif
+  for ( const std::vector< SpikeDataWithRank >* spikes : local_spikes_to_deliver_ )
+  {
+#ifdef CYCLE_TIMERS
+    deliver_connections +=
+#endif
+      deliver_spike_batches_(
+        tid,
+        spikes->size(),
+        [ spikes ]( const size_t i ) -> const SpikeData& { return ( *spikes )[ i ].spike_data; },
+        prepared_timestamps,
+        cm );
+  }
+#ifdef CYCLE_TIMERS
+  // Only this thread writes its counter; the master reads it after the closing update barrier.
+  local_deliver_connections_[ tid ] += deliver_connections;
+#endif
+}
+
+void
+EventDeliveryManager::invalidate_min_delay_between_ranks()
+{
+  min_delay_between_ranks_ = -1;
+}
+
+void
+EventDeliveryManager::check_remote_exchange_window()
+{
+  // EXPERIMENTAL, NOT STOCK NEST.
+  if ( remote_exchange_slices_ == 1 )
+  {
+    return;
+  }
+  if ( off_grid_spiking_ or kernel().connection_manager.secondary_connections_exist()
+    or kernel().sp_manager.is_structural_plasticity_enabled() )
+  {
+    throw KernelException(
+      "remote_exchange_slices > 1 is not available with off-grid spiking, secondary connections or structural "
+      "plasticity." );
+  }
+
+  const long window_steps = static_cast< long >( remote_exchange_slices_ ) * kernel().connection_manager.get_min_delay();
+  if ( window_steps > static_cast< long >( MAX_LAG ) )
+  {
+    throw KernelException( String::compose(
+      "remote_exchange_slices * min_delay is %1 steps; the spike lag field holds at most %2.", window_steps, MAX_LAG ) );
+  }
+
+  if ( min_delay_between_ranks_ < 0 )
+  {
+    min_delay_between_ranks_ = kernel().connection_manager.get_min_delay_between_ranks();
+  }
+  if ( min_delay_between_ranks_ < window_steps )
+  {
+    throw KernelException( String::compose(
+      "remote_exchange_slices = %1 needs every connection between processes to have a delay of at least %2 steps; "
+      "the shortest has %3.",
+      remote_exchange_slices_,
+      window_steps,
+      min_delay_between_ranks_ ) );
+  }
+}
 
 void
 EventDeliveryManager::gather_target_data( const size_t tid )

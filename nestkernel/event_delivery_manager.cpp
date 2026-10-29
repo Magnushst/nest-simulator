@@ -1006,10 +1006,12 @@ EventDeliveryManager::check_remote_exchange_window()
   }
 
   const long window_steps = static_cast< long >( remote_exchange_slices_ ) * kernel().connection_manager.get_min_delay();
-  if ( window_steps > static_cast< long >( MAX_LAG ) )
+  // SpikeData's lag field has NUM_BITS_LAG bits and takes lags below its largest value (SpikeData::MAX_LAG)
+  const long max_lag = static_cast< long >( generate_max_value( NUM_BITS_LAG ) );
+  if ( window_steps > max_lag )
   {
     throw KernelException( String::compose(
-      "remote_exchange_slices * min_delay is %1 steps; the spike lag field holds at most %2.", window_steps, MAX_LAG ) );
+      "remote_exchange_slices * min_delay is %1 steps; the spike lag field holds at most %2.", window_steps, max_lag ) );
   }
 
   if ( min_delay_between_ranks_ < 0 )

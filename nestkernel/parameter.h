@@ -169,6 +169,13 @@ public:
     return value_;
   }
 
+  //! EXPERIMENTAL, NOT STOCK NEST: read by the law resolver for regenerated connections (procedural_law.h)
+  double
+  get_value() const
+  {
+    return value_;
+  }
+
 private:
   double value_;
 };
@@ -276,6 +283,19 @@ public:
 
   double value( RngPtr rng, Node* node ) override;
 
+  //! EXPERIMENTAL, NOT STOCK NEST: read by the law resolver for regenerated connections (procedural_law.h)
+  double
+  get_mean() const
+  {
+    return mean_;
+  }
+
+  double
+  get_std() const
+  {
+    return std_;
+  }
+
 private:
   double mean_, std_;
   std::vector< normal_distribution > normal_dists_;
@@ -302,6 +322,19 @@ public:
   LognormalParameter( const Dictionary& d );
 
   double value( RngPtr rng, Node* node ) override;
+
+  //! EXPERIMENTAL, NOT STOCK NEST: read by the law resolver for regenerated connections (procedural_law.h)
+  double
+  get_mean() const
+  {
+    return mean_;
+  }
+
+  double
+  get_std() const
+  {
+    return std_;
+  }
 
 private:
   double mean_, std_;
@@ -862,6 +895,19 @@ public:
     return std::min( p_->value( rng, source_pos, target_pos, layer, node ), other_value_ );
   }
 
+  //! EXPERIMENTAL, NOT STOCK NEST: read by the law resolver for regenerated connections (procedural_law.h)
+  ParameterPTR
+  get_operand() const
+  {
+    return p_;
+  }
+
+  double
+  get_bound() const
+  {
+    return other_value_;
+  }
+
 protected:
   ParameterPTR const p_;
   double other_value_;
@@ -911,6 +957,19 @@ public:
     return std::max( p_->value( rng, source_pos, target_pos, layer, node ), other_value_ );
   }
 
+  //! EXPERIMENTAL, NOT STOCK NEST: read by the law resolver for regenerated connections (procedural_law.h)
+  ParameterPTR
+  get_operand() const
+  {
+    return p_;
+  }
+
+  double
+  get_bound() const
+  {
+    return other_value_;
+  }
+
 protected:
   ParameterPTR const p_;
   double other_value_;
@@ -947,6 +1006,31 @@ public:
     const std::vector< double >& target_pos,
     const AbstractLayer& layer,
     Node* node ) override;
+
+  //! EXPERIMENTAL, NOT STOCK NEST: read by the law resolver for regenerated connections (procedural_law.h)
+  ParameterPTR
+  get_operand() const
+  {
+    return p_;
+  }
+
+  double
+  get_min() const
+  {
+    return min_;
+  }
+
+  double
+  get_max() const
+  {
+    return max_;
+  }
+
+  size_t
+  get_max_redraws() const
+  {
+    return max_redraws_;
+  }
 
 protected:
   ParameterPTR const p_;

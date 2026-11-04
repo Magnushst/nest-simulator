@@ -415,6 +415,13 @@ public:
     return parameter_->returns_int_only();
   }
 
+  //! EXPERIMENTAL, NOT STOCK NEST: read by the law resolver for regenerated connections (procedural_law.h)
+  ParameterPTR
+  get_parameter() const
+  {
+    return parameter_;
+  }
+
 private:
   ParameterPTR parameter_;
 };

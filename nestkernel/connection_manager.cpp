@@ -52,6 +52,7 @@
 #include "nest_names.h"
 #include "nest_types.h"
 #include "node.h"
+#include "procedural_connector.h"
 #include "stopwatch_impl.h"
 #include "target_table_devices_impl.h"
 
@@ -147,6 +148,54 @@ nest::ConnectionManager::initialize( const bool adjust_number_of_threads_or_rng_
 
   std::vector< std::vector< size_t > > tmp2( kernel().vp_manager.get_num_threads(), std::vector< size_t >() );
   num_connections_.swap( tmp2 );
+
+  // EXPERIMENTAL, NOT STOCK NEST: regenerated connections (procedural_connector.h)
+  procedural_connections_.assign( num_threads, 0 );
+  procedural_syn_id_ = invalid_synindex;
+  if ( not adjust_number_of_threads_or_rng_only )
+  {
+    procedural_projections_ = 0;
+  }
+}
+
+std::uint64_t
+nest::ConnectionManager::next_procedural_projection()
+{
+  kernel().vp_manager.assert_single_threaded();
+  return procedural_projections_++;
+}
+
+void
+nest::ConnectionManager::add_procedural_connections( const size_t tid,
+  const synindex syn_id,
+  std::unique_ptr< ProceduralRecord > record,
+  const std::vector< std::uint64_t >& sources_with_connections,
+  const std::uint64_t connections )
+{
+  if ( not connections_[ tid ][ syn_id ] )
+  {
+    connections_[ tid ][ syn_id ] = new ProceduralConnector( syn_id );
+  }
+  ProceduralConnector* const connector = dynamic_cast< ProceduralConnector* >( connections_[ tid ][ syn_id ] );
+  assert( connector );
+  const std::uint32_t r = connector->add_record( std::move( record ) );
+  const NodeCollectionPTR& sources = connector->record( r ).sources;
+
+  // one entry, and one source in the source table, per source with connections on this thread
+  for ( const std::uint64_t s : sources_with_connections )
+  {
+    connector->add_entry( r, s );
+    source_table_.add_source( tid, syn_id, ( *sources )[ s ], /* is_primary */ true );
+    increase_connection_count( tid, syn_id );
+  }
+  procedural_connections_[ tid ] += connections;
+
+  if ( check_primary_connections_[ tid ].is_false() )
+  {
+#pragma omp atomic write
+    has_primary_connections_ = true;
+    check_primary_connections_.set_true( tid );
+  }
 }
 
 void
@@ -1058,8 +1107,16 @@ nest::ConnectionManager::get_num_connections() const
   {
     for ( size_t s = 0; s < num_connections_[ t ].size(); ++s )
     {
-      num_connections += num_connections_[ t ][ s ];
+      // EXPERIMENTAL, NOT STOCK NEST: regenerated connections are counted apart from their entries
+      if ( s != procedural_syn_id_ )
+      {
+        num_connections += num_connections_[ t ][ s ];
+      }
     }
+  }
+  for ( const std::uint64_t n : procedural_connections_ )
+  {
+    num_connections += n;
   }
 
   return num_connections;
@@ -1068,6 +1125,17 @@ nest::ConnectionManager::get_num_connections() const
 size_t
 nest::ConnectionManager::get_num_connections( const synindex syn_id ) const
 {
+  // EXPERIMENTAL, NOT STOCK NEST: regenerated connections are counted apart from their entries
+  if ( syn_id == procedural_syn_id_ )
+  {
+    size_t n = 0;
+    for ( const std::uint64_t c : procedural_connections_ )
+    {
+      n += c;
+    }
+    return n;
+  }
+
   size_t num_connections = 0;
   for ( size_t t = 0; t < num_connections_.size(); ++t )
   {

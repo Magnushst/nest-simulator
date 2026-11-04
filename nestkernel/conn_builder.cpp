@@ -29,14 +29,19 @@
 #include "conn_builder_impl.h"
 #include "conn_parameter.h"
 #include "connection_manager.h"
+#include "delay_checker.h"
 #include "exceptions.h"
 #include "kernel_manager.h"
 #include "nest_names.h"
 #include "node.h"
+#include "procedural_connector.h" // EXPERIMENTAL, NOT STOCK NEST
+#include "procedural_law.h"       // EXPERIMENTAL, NOT STOCK NEST
 #include "vp_manager_impl.h"
 
 // Includes from C++:
 #include <algorithm>
+#include <limits>
+#include <memory>
 
 
 nest::ConnBuilder::ConnBuilder( const std::string& primary_rule,
@@ -1715,11 +1720,45 @@ nest::FixedTotalNumberBuilder::FixedTotalNumberBuilder( NodeCollectionPTR source
   {
     throw NotImplemented( "Connect doesn't support the suppression of multapses in the FixedTotalNumber connector." );
   }
+
+  // EXPERIMENTAL, NOT STOCK NEST: regenerated connections (procedural_connector.h)
+  conn_spec.update_value( "procedural", procedural_ );
+  if ( procedural_ )
+  {
+    if ( not allow_autapses_ )
+    {
+      throw NotImplemented(
+        "\"procedural\" needs allow_autapses True: without autapses NEST draws the pair again, a law the regenerated "
+        "connections do not reproduce." );
+    }
+    if ( synapse_model_id_.size() != 1 or third_out_ or use_structural_plasticity_ or make_symmetric_ )
+    {
+      throw NotImplemented(
+        "\"procedural\" takes one synapse specification, without third-party connections, structural plasticity or "
+        "symmetric connections." );
+    }
+    if ( synapse_model_id_[ 0 ] != kernel().model_manager.get_synapse_model_id( "static_synapse" ) )
+    {
+      throw NotImplemented( "\"procedural\" takes static_synapse only." );
+    }
+    if ( not synapse_params_[ 0 ].empty() )
+    {
+      throw NotImplemented( "\"procedural\" takes weight and delay only." );
+    }
+    projection_ = kernel().connection_manager.next_procedural_projection();
+  }
 }
 
 void
 nest::FixedTotalNumberBuilder::connect_()
 {
+  // EXPERIMENTAL, NOT STOCK NEST: the stock path below is unchanged
+  if ( procedural_ )
+  {
+    procedural_connect_();
+    return;
+  }
+
   const int M = kernel().vp_manager.get_num_virtual_processes();
   const long size_sources = sources_->size();
   const long size_targets = targets_->size();
@@ -1845,6 +1884,151 @@ nest::FixedTotalNumberBuilder::connect_()
     catch ( ... )
     {
       // Capture the current exception object and create an std::exception_ptr
+      exceptions_raised_.at( tid ) = std::current_exception();
+    }
+  }
+}
+
+// EXPERIMENTAL, NOT STOCK NEST: fixed_total_number regenerated instead of stored (procedural_connector.h)
+void
+nest::FixedTotalNumberBuilder::procedural_connect_()
+{
+  // NEST's split of the N connections over virtual processes, as in connect_ above and with the same rank-synchronised
+  // draws, so that every process gets the share stock NEST gives it
+  const int M = kernel().vp_manager.get_num_virtual_processes();
+  const long size_targets = targets_->size();
+
+  std::vector< size_t > number_of_targets_on_vp( M, 0 );
+  std::vector< size_t > local_targets;
+  local_targets.reserve( size_targets / kernel().mpi_manager.get_num_processes() );
+  for ( size_t t = 0; t < targets_->size(); t++ )
+  {
+    int vp = kernel().vp_manager.node_id_to_vp( ( *targets_ )[ t ] );
+    ++number_of_targets_on_vp[ vp ];
+    if ( kernel().vp_manager.is_local_vp( vp ) )
+    {
+      local_targets.push_back( ( *targets_ )[ t ] );
+    }
+  }
+
+  std::vector< long > num_conns_on_vp( M, 0 );
+  RngPtr grng = get_rank_synced_rng();
+  double sum_dist = 0.0;
+  unsigned int sum_partitions = 0;
+  binomial_distribution bino_dist;
+  for ( int k = 0; k < M; k++ )
+  {
+    if ( N_ == sum_partitions )
+    {
+      break;
+    }
+    if ( number_of_targets_on_vp[ k ] > 0 )
+    {
+      double num_local_targets = static_cast< double >( number_of_targets_on_vp[ k ] );
+      double p_local = num_local_targets / ( size_targets - sum_dist );
+
+      binomial_distribution::param_type param( N_ - sum_partitions, p_local );
+      num_conns_on_vp[ k ] = bino_dist( grng, param );
+    }
+
+    sum_dist += static_cast< double >( number_of_targets_on_vp[ k ] );
+    sum_partitions += static_cast< unsigned int >( num_conns_on_vp[ k ] );
+  }
+
+  // the projection's key, its synapse type, and its laws, resolved once; a default weight or delay is the synapse
+  // model's constant
+  const synindex psyn = kernel().model_manager.get_synapse_model_id( "static_synapse_procedural" );
+  kernel().connection_manager.set_procedural_syn_id( psyn );
+  const ProceduralWords::Philox::key_type key { { kernel().random_manager.get_base_seed(), projection_ } };
+  Dictionary defaults;
+  kernel().model_manager.get_connection_model( synapse_model_id_[ 0 ], 0 ).get_status( defaults );
+  ProceduralLaw weight;
+  ProceduralLaw delay;
+  if ( default_weight_[ 0 ] )
+  {
+    weight.mean = defaults.get< double >( names::weight );
+  }
+  else
+  {
+    weight = resolve_procedural_law( *weights_[ 0 ] );
+  }
+  if ( default_delay_[ 0 ] )
+  {
+    delay.mean = defaults.get< double >( names::delay );
+  }
+  else
+  {
+    delay = resolve_procedural_law( *delays_[ 0 ] );
+  }
+
+#pragma omp parallel
+  {
+    const size_t tid = kernel().vp_manager.get_thread_id();
+
+    try
+    {
+      const size_t vp_id = kernel().vp_manager.thread_to_vp( tid );
+
+      if ( kernel().vp_manager.is_local_vp( vp_id ) and num_conns_on_vp[ vp_id ] > 0 )
+      {
+        // the targets on this process, in NEST's order
+        std::vector< Node* > targets;
+        targets.reserve( number_of_targets_on_vp[ vp_id ] );
+        for ( const size_t tnode_id : local_targets )
+        {
+          if ( kernel().vp_manager.node_id_to_vp( tnode_id ) == vp_id )
+          {
+            targets.push_back( kernel().node_manager.get_node_or_proxy( tnode_id, tid ) );
+          }
+        }
+        assert( targets.size() == number_of_targets_on_vp[ vp_id ] );
+
+        // neurons only, and the receptor port the connection check gives
+        Node* const source = kernel().node_manager.get_node_or_proxy( ( *sources_ )[ 0 ], tid );
+        if ( not targets[ 0 ]->has_proxies() or not source->has_proxies() )
+        {
+          throw IllegalConnection( "\"procedural\" connects neurons only, not devices." );
+        }
+        const size_t rport = source->send_test_event( *targets[ 0 ], 0, synapse_model_id_[ 0 ], true );
+
+        const std::uint64_t total = static_cast< std::uint64_t >( num_conns_on_vp[ vp_id ] );
+        auto record = std::make_unique< ProceduralRecord >(
+          key, vp_id, sources_, std::move( targets ), total, weight, delay, rport );
+
+        // the sources with connections here, and the delay pass: every connection regenerated once, nothing stored
+        const ProceduralZiggurat zig;
+        std::vector< std::uint64_t > with_connections;
+        std::uint64_t counted = 0;
+        double dmin = std::numeric_limits< double >::infinity();
+        double dmax = -std::numeric_limits< double >::infinity();
+        record->shares.for_each_nonzero(
+          [ & ]( const std::uint64_t s, const std::uint64_t k )
+          {
+            with_connections.push_back( s );
+            counted += k;
+            for ( std::uint64_t i = 0; i < k; ++i )
+            {
+              record->connection( zig,
+                s,
+                i,
+                [ & ]( const std::uint64_t, const double, const double d )
+                {
+                  dmin = std::min( dmin, d );
+                  dmax = std::max( dmax, d );
+                } );
+            }
+          } );
+        assert( counted == total );
+        DelayChecker& checker = kernel().connection_manager.get_delay_checker();
+        checker.assert_valid_delay_ms( dmin );
+        checker.assert_valid_delay_ms( dmax );
+
+        kernel().connection_manager.add_procedural_connections(
+          tid, psyn, std::move( record ), with_connections, total );
+      }
+    }
+    catch ( ... )
+    {
       exceptions_raised_.at( tid ) = std::current_exception();
     }
   }

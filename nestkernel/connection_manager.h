@@ -24,6 +24,8 @@
 #define CONNECTION_MANAGER_H
 
 // C++ includes:
+#include <cstdint>
+#include <memory>
 #include <string>
 
 // Includes from libnestutil:
@@ -48,6 +50,7 @@
 
 namespace nest
 {
+struct ProceduralRecord; // EXPERIMENTAL, NOT STOCK NEST (procedural_connector.h)
 class GenericBipartiteConnBuilderFactory;
 class GenericThirdConnBuilderFactory;
 class spikecounter;
@@ -257,6 +260,26 @@ public:
    * Returns the number of connections in the network.
    */
   size_t get_num_connections() const;
+
+  //! EXPERIMENTAL, NOT STOCK NEST: numbers regenerated projections in the order of Connect, the same on every rank.
+  std::uint64_t next_procedural_projection();
+
+  /**
+   * EXPERIMENTAL, NOT STOCK NEST: adds a regenerated projection's record on thread tid, with one connector entry and
+   * one source-table entry per source with connections there (procedural_connector.h).
+   */
+  void add_procedural_connections( const size_t tid,
+    const synindex syn_id,
+    std::unique_ptr< ProceduralRecord > record,
+    const std::vector< std::uint64_t >& sources_with_connections,
+    const std::uint64_t connections );
+
+  //! EXPERIMENTAL, NOT STOCK NEST: the synapse type whose connections are counted as regenerated ones.
+  void
+  set_procedural_syn_id( const synindex syn_id )
+  {
+    procedural_syn_id_ = syn_id;
+  }
 
   /**
    * Returns the number of connections of this synapse type.
@@ -666,6 +689,11 @@ private:
    * type. Arranged in a 2d structure: threads|synapsetypes.
    */
   std::vector< std::vector< size_t > > num_connections_;
+
+  // EXPERIMENTAL, NOT STOCK NEST: regenerated connections per thread, their synapse type, and the projections so far
+  std::vector< std::uint64_t > procedural_connections_;
+  synindex procedural_syn_id_ = invalid_synindex;
+  std::uint64_t procedural_projections_ = 0;
 
   Dictionary connruledict_;  //!< Dictionary for connection rules.
 

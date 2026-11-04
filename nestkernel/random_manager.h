@@ -92,6 +92,14 @@ public:
    */
   RngPtr get_vp_specific_rng( size_t tid ) const;
 
+  //! EXPERIMENTAL, NOT STOCK NEST: the base seed, the first word of a regenerated projection's key
+  //! (procedural_connector.h).
+  std::uint32_t
+  get_base_seed() const
+  {
+    return base_seed_;
+  }
+
   /**
    * Confirm that rank- and thread-synchronized RNGs are in sync.
    *

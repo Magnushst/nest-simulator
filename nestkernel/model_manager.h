@@ -112,6 +112,9 @@ public:
   template < template < typename targetidentifierT > class ConnectionT >
   void register_connection_model( const std::string& name );
 
+  //! EXPERIMENTAL, NOT STOCK NEST: registers the synapse type of regenerated connections (procedural_connector.h).
+  void register_procedural_connection_model( const std::string& name );
+
   /**
    * Copy an existing model and register it as a new model.
    *

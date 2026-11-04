@@ -130,6 +130,41 @@ public:
     return count;
   }
 
+  /**
+   * Calls use( s, count ) for every source with connections, in increasing order of s: one walk over the tree's
+   * non-empty branches, splitting as share() does, so the counts are the same, at a cost that grows with the total
+   * rather than with the number of sources.
+   */
+  template < typename F >
+  void
+  for_each_nonzero( F&& use ) const
+  {
+    struct Branch
+    {
+      std::uint64_t v, lo, hi, count;
+      std::uint32_t depth;
+    };
+    std::vector< Branch > stack { Branch { 1, 0, sources_, counts_[ 1 ], 0 } };
+    while ( not stack.empty() )
+    {
+      const Branch b = stack.back();
+      stack.pop_back();
+      if ( b.count == 0 )
+      {
+        continue;
+      }
+      if ( b.hi - b.lo == 1 )
+      {
+        use( b.lo, b.count );
+        continue;
+      }
+      const std::uint64_t mid = b.lo + ( b.hi - b.lo ) / 2;
+      const std::uint64_t left = b.depth < depth_ ? counts_[ 2 * b.v ] : left_share_( b.v, b.count, b.lo, mid, b.hi );
+      stack.push_back( Branch { 2 * b.v + 1, mid, b.hi, b.count - left, b.depth + 1 } ); // the right half after the left
+      stack.push_back( Branch { 2 * b.v, b.lo, mid, left, b.depth + 1 } );
+    }
+  }
+
   //! The kept counts' memory, in bytes.
   std::size_t
   bytes() const

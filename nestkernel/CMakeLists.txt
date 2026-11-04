@@ -57,7 +57,7 @@ set ( nestkernel_sources
       node.h node.cpp
       parameter.h parameter.cpp
       per_thread_bool_indicator.h per_thread_bool_indicator.cpp
-      procedural_law.h procedural_random.h procedural_share.h
+      procedural_connector.h procedural_law.h procedural_random.h procedural_share.h
       proxynode.h proxynode.cpp
       random_generators.h
       recording_device.h recording_device.cpp

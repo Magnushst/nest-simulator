@@ -31,6 +31,7 @@
  */
 
 // C++ includes:
+#include <cstdint>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -67,6 +68,9 @@ class ThirdOutBuilder;
  */
 class BipartiteConnBuilder
 {
+  // EXPERIMENTAL, NOT STOCK NEST: its regenerated branch reads the weights, delays and synapse parameters
+  friend class FixedTotalNumberBuilder;
+
 public:
   //! Connect with or without structural plasticity
   virtual void connect();
@@ -710,7 +714,12 @@ protected:
   void connect_() override;
 
 private:
+  //! EXPERIMENTAL, NOT STOCK NEST: the connections regenerated instead of stored (procedural_connector.h).
+  void procedural_connect_();
+
   long N_;
+  bool procedural_ = false;      //!< EXPERIMENTAL, NOT STOCK NEST: conn_spec "procedural"
+  std::uint64_t projection_ = 0; //!< EXPERIMENTAL, NOT STOCK NEST: this projection's number, its key's second word
 };
 
 class BernoulliBuilder : public BipartiteConnBuilder

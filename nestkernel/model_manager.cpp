@@ -37,6 +37,7 @@
 #include "genericmodel_impl.h"
 #include "kernel_manager.h"
 #include "model_manager_impl.h"
+#include "procedural_connector.h"
 #include "proxynode.h"
 #include "vp_manager_impl.h"
 
@@ -84,6 +85,37 @@ ModelManager::initialize( const bool )
   // the model-managing data structures depend on the number of threads.
   // Models provided by extension modules will be re-registered by the ModulesManager.
   register_models();
+
+  // EXPERIMENTAL, NOT STOCK NEST: the synapse type of regenerated connections
+  register_procedural_connection_model( "static_synapse_procedural" );
+}
+
+void
+ModelManager::register_procedural_connection_model( const std::string& name )
+{
+  kernel().vp_manager.assert_single_threaded();
+
+  if ( synapsedict_.known( name ) )
+  {
+    throw NamingConflict(
+      String::compose( "A synapse type called '%1' already exists.\nPlease choose a different name!", name ) );
+  }
+
+  const auto new_syn_id = get_num_connection_models();
+  if ( new_syn_id >= invalid_synindex )
+  {
+    throw KernelException( "Synapse model count exceeded" );
+  }
+
+  synapsedict_[ name ] = static_cast< long >( new_syn_id );
+
+#pragma omp parallel
+  {
+    ConnectorModel* conn_model = new ProceduralConnectorModel( name );
+    conn_model->set_syn_id( new_syn_id );
+    connection_models_.at( kernel().vp_manager.get_thread_id() ).push_back( conn_model );
+    kernel().connection_manager.resize_connections();
+  }
 }
 
 void

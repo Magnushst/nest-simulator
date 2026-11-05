@@ -24,8 +24,10 @@
  * EXPERIMENTAL, NOT STOCK NEST (regenerated connections, Stage A).
  *
  * Keyed random draws for regenerated connections. Every draw is a pure function of a key (seed, projection) and a
- * counter (draw, then three words naming the connection), so a connection regenerates bit for bit whenever it is
- * delivered. Nothing here depends on the rest of NEST, so it is tested on its own.
+ * counter naming what it is for, so a connection regenerates bit for bit whenever it is delivered. A projection's
+ * shares over its sources use Philox4x64 (ProceduralWords); each connection's target, weight and delay use
+ * Philox4x32-10 (ProceduralWords32), whose 32 x 32-bit products let eight connections be drawn at once with AVX2
+ * (procedural_philox_lanes). Nothing here depends on the rest of NEST, so it is tested on its own.
  */
 
 #ifndef PROCEDURAL_RANDOM_H
@@ -40,17 +42,67 @@
 #include <limits>
 #include <stdexcept>
 
+#if defined( __AVX2__ )
+#include <immintrin.h>
+#endif
+
 // Includes from thirdparty:
 #include "Random123/philox.h"
 
 namespace nest
 {
 
+//! Uniform numbers from a stream of 32-bit words: a word stream derives from this and gives next().
+template < class Words >
+class ProceduralUniforms
+{
+public:
+  //! A uniform double on (0, 1] from two words: 53 bits plus one unit, so a logarithm never sees 0.
+  double
+  open_closed()
+  {
+    const std::uint64_t hi = words_().next();
+    return static_cast< double >( ( ( hi << 21 ) | ( words_().next() >> 11 ) ) + 1 ) * 0x1p-53;
+  }
+
+  //! A uniform double on [0, 1) from two words.
+  double
+  closed_open()
+  {
+    const std::uint64_t hi = words_().next();
+    return static_cast< double >( ( hi << 21 ) | ( words_().next() >> 11 ) ) * 0x1p-53;
+  }
+
+  //! A uniform integer on [0, n), n > 0, exactly: Lemire's multiply-shift on 64 bits, with rejection.
+  std::uint64_t
+  below( const std::uint64_t n )
+  {
+    __extension__ using u128 = unsigned __int128;
+    const std::uint64_t threshold = ( 0 - n ) % n;
+    for ( ;; )
+    {
+      const std::uint64_t hi = words_().next();
+      const u128 m = static_cast< u128 >( ( hi << 32 ) | words_().next() ) * n;
+      if ( static_cast< std::uint64_t >( m ) >= threshold )
+      {
+        return static_cast< std::uint64_t >( m >> 64 );
+      }
+    }
+  }
+
+private:
+  Words&
+  words_()
+  {
+    return static_cast< Words& >( *this );
+  }
+};
+
 /**
  * The 32-bit words of one keyed stream: Philox4x64 blocks at counters (draw, c1, c2, c3), with the draw word counting
  * up from the counter the stream starts at.
  */
-class ProceduralWords
+class ProceduralWords : public ProceduralUniforms< ProceduralWords >
 {
 public:
   using Philox = r123::Philox4x64;
@@ -77,44 +129,142 @@ public:
     return r;
   }
 
-  //! A uniform double on (0, 1] from two words: 53 bits plus one unit, so a logarithm never sees 0.
-  double
-  open_closed()
-  {
-    const std::uint64_t hi = next();
-    return static_cast< double >( ( ( hi << 21 ) | ( next() >> 11 ) ) + 1 ) * 0x1p-53;
-  }
-
-  //! A uniform double on [0, 1) from two words.
-  double
-  closed_open()
-  {
-    const std::uint64_t hi = next();
-    return static_cast< double >( ( hi << 21 ) | ( next() >> 11 ) ) * 0x1p-53;
-  }
-
-  //! A uniform integer on [0, n), n > 0, exactly: Lemire's multiply-shift on 64 bits, with rejection.
-  std::uint64_t
-  below( const std::uint64_t n )
-  {
-    __extension__ using u128 = unsigned __int128;
-    const std::uint64_t threshold = ( 0 - n ) % n;
-    for ( ;; )
-    {
-      const std::uint64_t hi = next();
-      const u128 m = static_cast< u128 >( ( hi << 32 ) | next() ) * n;
-      if ( static_cast< std::uint64_t >( m ) >= threshold )
-      {
-        return static_cast< std::uint64_t >( m >> 64 );
-      }
-    }
-  }
-
 private:
   Philox::key_type key_;
   Philox::ctr_type counter_;
   Philox::ctr_type block_ {};
   unsigned used_ = 8;
+};
+
+using ProceduralCtr32 = std::array< std::uint32_t, 4 >;
+using ProceduralKey32 = std::array< std::uint32_t, 2 >;
+
+/**
+ * Philox4x32-10 (Salmon and others, SC 2011), as Random123's r123::Philox4x32 computes it (the tests compare the two)
+ * and as the prototype engine writes it out, so that procedural_philox_lanes can give the same numbers eight at once.
+ */
+inline ProceduralCtr32
+procedural_philox32( ProceduralCtr32 c, ProceduralKey32 k )
+{
+  constexpr std::uint64_t m0 = 0xD2511F53u;
+  constexpr std::uint64_t m1 = 0xCD9E8D57u;
+  for ( int r = 0; r < 10; ++r )
+  {
+    if ( r > 0 )
+    {
+      k[ 0 ] += 0x9E3779B9u;
+      k[ 1 ] += 0xBB67AE85u;
+    }
+    const std::uint64_t p0 = m0 * c[ 0 ];
+    const std::uint64_t p1 = m1 * c[ 2 ];
+    c = { static_cast< std::uint32_t >( p1 >> 32 ) ^ c[ 1 ] ^ k[ 0 ],
+      static_cast< std::uint32_t >( p1 ),
+      static_cast< std::uint32_t >( p0 >> 32 ) ^ c[ 3 ] ^ k[ 1 ],
+      static_cast< std::uint32_t >( p0 ) };
+  }
+  return c;
+}
+
+//! Eight Philox4x32-10 counters, one array per counter word, replaced in place by their blocks.
+constexpr std::size_t procedural_lanes = 8;
+struct ProceduralLanes
+{
+  alignas( 32 ) std::array< std::array< std::uint32_t, procedural_lanes >, 4 > w;
+};
+
+/**
+ * procedural_philox32 for eight counters at once: with AVX2 one register per counter word, the even and odd lanes'
+ * 32 x 32 -> 64-bit products by _mm256_mul_epu32, recombined by blends, as the prototype engine computes them;
+ * otherwise a loop. The numbers are exactly procedural_philox32's.
+ */
+inline void
+procedural_philox_lanes( ProceduralLanes& c, ProceduralKey32 k )
+{
+#if defined( __AVX2__ )
+  const auto load = [ & ]( const std::size_t i )
+  { return _mm256_load_si256( reinterpret_cast< const __m256i* >( c.w[ i ].data() ) ); };
+  __m256i c0 = load( 0 );
+  __m256i c1 = load( 1 );
+  __m256i c2 = load( 2 );
+  __m256i c3 = load( 3 );
+  const __m256i m0 = _mm256_set1_epi32( static_cast< int >( 0xD2511F53u ) );
+  const __m256i m1 = _mm256_set1_epi32( static_cast< int >( 0xCD9E8D57u ) );
+  // the high and low 32 bits of m * x for each 32-bit lane of x
+  const auto mul = []( const __m256i m, const __m256i x, __m256i& hi, __m256i& lo )
+  {
+    const __m256i even = _mm256_mul_epu32( m, x );
+    const __m256i odd = _mm256_mul_epu32( m, _mm256_srli_epi64( x, 32 ) );
+    hi = _mm256_blend_epi32( _mm256_srli_epi64( even, 32 ), odd, 0xAA );
+    lo = _mm256_blend_epi32( even, _mm256_slli_epi64( odd, 32 ), 0xAA );
+  };
+  for ( int r = 0; r < 10; ++r )
+  {
+    if ( r > 0 )
+    {
+      k[ 0 ] += 0x9E3779B9u;
+      k[ 1 ] += 0xBB67AE85u;
+    }
+    __m256i hi0, lo0, hi1, lo1;
+    mul( m0, c0, hi0, lo0 );
+    mul( m1, c2, hi1, lo1 );
+    c0 = _mm256_xor_si256( _mm256_xor_si256( hi1, c1 ), _mm256_set1_epi32( static_cast< int >( k[ 0 ] ) ) );
+    c1 = lo1;
+    c2 = _mm256_xor_si256( _mm256_xor_si256( hi0, c3 ), _mm256_set1_epi32( static_cast< int >( k[ 1 ] ) ) );
+    c3 = lo0;
+  }
+  const auto store = [ & ]( const std::size_t i, const __m256i v )
+  { _mm256_store_si256( reinterpret_cast< __m256i* >( c.w[ i ].data() ), v ); };
+  store( 0, c0 );
+  store( 1, c1 );
+  store( 2, c2 );
+  store( 3, c3 );
+#else
+  for ( std::size_t l = 0; l < procedural_lanes; ++l )
+  {
+    const ProceduralCtr32 r = procedural_philox32( { c.w[ 0 ][ l ], c.w[ 1 ][ l ], c.w[ 2 ][ l ], c.w[ 3 ][ l ] }, k );
+    for ( std::size_t i = 0; i < 4; ++i )
+    {
+      c.w[ i ][ l ] = r[ i ];
+    }
+  }
+#endif
+}
+
+/**
+ * The 32-bit words of one connection: the two Philox4x32-10 blocks drawn for it (blocks 0 and 1 of its counter, often
+ * eight connections at once), then further blocks of the same counter, its last word counting on from 2.
+ */
+class ProceduralWords32 : public ProceduralUniforms< ProceduralWords32 >
+{
+public:
+  ProceduralWords32( const ProceduralKey32& key, const ProceduralCtr32& counter, const std::array< std::uint32_t, 8 >& first )
+    : key_( key )
+    , counter_( counter )
+    , buffer_( first )
+  {
+  }
+
+  std::uint32_t
+  next()
+  {
+    if ( used_ == available_ )
+    {
+      counter_[ 3 ] = block_++;
+      const ProceduralCtr32 b = procedural_philox32( counter_, key_ );
+      std::copy( b.begin(), b.end(), buffer_.begin() );
+      available_ = 4;
+      used_ = 0;
+    }
+    return buffer_[ used_++ ];
+  }
+
+private:
+  ProceduralKey32 key_;
+  ProceduralCtr32 counter_;
+  std::array< std::uint32_t, 8 > buffer_;
+  unsigned used_ = 0;
+  unsigned available_ = 8;
+  std::uint32_t block_ = 2;
 };
 
 /**
@@ -141,8 +291,9 @@ public:
     }
   }
 
+  template < class Words >
   double
-  normal( ProceduralWords& w ) const
+  normal( Words& w ) const
   {
     for ( ;; )
     {
@@ -190,7 +341,7 @@ private:
  */
 enum class ProceduralStream : std::uint64_t
 {
-  connection = 1, //!< (connection index, source index): one connection's target, weight and delay
+  connection = 1, //!< one connection's target, weight and delay (Philox4x32-10, procedural_connection_counter)
   share = 2       //!< (tree node, 0): a split of a projection's connections over its sources
 };
 
@@ -198,6 +349,17 @@ inline ProceduralWords::Philox::ctr_type
 procedural_counter( const ProceduralStream stream, const std::uint64_t a, const std::uint64_t b, const std::uint64_t vp )
 {
   return ProceduralWords::Philox::ctr_type { { 0, a, b, ( static_cast< std::uint64_t >( stream ) << 56 ) | vp } };
+}
+
+/**
+ * The Philox4x32-10 counter of connection i of source s on virtual process vp: the source, the stream's tag in the top
+ * byte above the virtual process (below 2^24), the connection, and the block. The caller keeps s below 2^32 and i
+ * below 2^32.
+ */
+inline ProceduralCtr32
+procedural_connection_counter( const std::uint32_t s, const std::uint32_t vp, const std::uint32_t i, const std::uint32_t block )
+{
+  return { s, ( static_cast< std::uint32_t >( ProceduralStream::connection ) << 24 ) | vp, i, block };
 }
 
 /**
@@ -335,8 +497,9 @@ struct ProceduralLaw
   double high = std::numeric_limits< double >::infinity();
   std::size_t max_redraws = 1000;
 
+  template < class Words >
   double
-  draw( const ProceduralZiggurat& z, ProceduralWords& w ) const
+  draw( const ProceduralZiggurat& z, Words& w ) const
   {
     for ( std::size_t draws = 1;; ++draws )
     {

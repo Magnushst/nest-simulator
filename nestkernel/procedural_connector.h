@@ -76,6 +76,7 @@ struct ProceduralRecord
     const ProceduralLaw& delay_,
     const size_t rport_ )
     : key( key_ )
+    , key32( { static_cast< std::uint32_t >( key_[ 0 ] ), static_cast< std::uint32_t >( key_[ 1 ] ) } )
     , vp( vp_ )
     , sources( std::move( sources_ ) )
     , targets( std::move( targets_ ) )
@@ -84,24 +85,64 @@ struct ProceduralRecord
     , delay( delay_ )
     , rport( rport_ )
   {
+    if ( ( key_[ 0 ] >> 32 ) != 0 or ( key_[ 1 ] >> 32 ) != 0 or ( vp_ >> 24 ) != 0 or ( sources->size() >> 32 ) != 0 )
+    {
+      throw KernelException(
+        "Regenerated connections need a seed and projection number below 2^32, fewer than 2^24 virtual processes "
+        "and fewer than 2^32 sources per projection." );
+    }
   }
 
   /**
-   * Regenerates connection i of source s on this process and calls use( target index, weight, delay in ms ). The
-   * target is uniform over the process's targets, as in NEST's fixed_total_number; weight and delay follow the laws.
+   * Regenerates connections 0 to k - 1 of source s on this process, eight at a time. Their Philox4x32-10 blocks come
+   * from procedural_philox_lanes. Then come each one's target, uniform over the process's targets as in NEST's
+   * fixed_total_number, and its weight and delay by the laws. Only then is use( target index, weight, delay in ms )
+   * called for each, so that the targets' input buffers are written after the draws.
    */
   template < typename F >
   void
-  connection( const ProceduralZiggurat& z, const std::uint64_t s, const std::uint64_t i, F&& use ) const
+  connections( const ProceduralZiggurat& z, const std::uint64_t s, const std::uint64_t k, F&& use ) const
   {
-    ProceduralWords w( key, procedural_counter( ProceduralStream::connection, i, s, vp ) );
-    const std::uint64_t t = w.below( targets.size() );
-    const double wt = weight.draw( z, w );
-    const double d = delay.draw( z, w );
-    use( t, wt, d );
+    ProceduralLanes a;
+    ProceduralLanes b;
+    std::array< std::uint64_t, procedural_lanes > t;
+    std::array< double, procedural_lanes > wt;
+    std::array< double, procedural_lanes > d;
+    const auto s32 = static_cast< std::uint32_t >( s );
+    const auto vp32 = static_cast< std::uint32_t >( vp );
+    for ( std::uint64_t i0 = 0; i0 < k; i0 += procedural_lanes )
+    {
+      for ( std::size_t l = 0; l < procedural_lanes; ++l )
+      {
+        const ProceduralCtr32 c = procedural_connection_counter( s32, vp32, static_cast< std::uint32_t >( i0 + l ), 0 );
+        for ( std::size_t j = 0; j < 4; ++j )
+        {
+          a.w[ j ][ l ] = c[ j ];
+          b.w[ j ][ l ] = c[ j ];
+        }
+        b.w[ 3 ][ l ] = 1;
+      }
+      procedural_philox_lanes( a, key32 );
+      procedural_philox_lanes( b, key32 );
+      const auto n = static_cast< std::size_t >( std::min< std::uint64_t >( procedural_lanes, k - i0 ) );
+      for ( std::size_t l = 0; l < n; ++l )
+      {
+        ProceduralWords32 w( key32,
+          procedural_connection_counter( s32, vp32, static_cast< std::uint32_t >( i0 + l ), 0 ),
+          { a.w[ 0 ][ l ], a.w[ 1 ][ l ], a.w[ 2 ][ l ], a.w[ 3 ][ l ], b.w[ 0 ][ l ], b.w[ 1 ][ l ], b.w[ 2 ][ l ], b.w[ 3 ][ l ] } );
+        t[ l ] = w.below( targets.size() );
+        wt[ l ] = weight.draw( z, w );
+        d[ l ] = delay.draw( z, w );
+      }
+      for ( std::size_t l = 0; l < n; ++l )
+      {
+        use( t[ l ], wt[ l ], d[ l ] );
+      }
+    }
   }
 
-  ProceduralWords::Philox::key_type key; //!< (seed, projection)
+  ProceduralWords::Philox::key_type key; //!< (seed, projection), for the share tree's Philox4x64
+  ProceduralKey32 key32;                 //!< the same, for the connections' Philox4x32-10
   std::uint64_t vp;                      //!< the virtual process
   NodeCollectionPTR sources;             //!< the projection's sources, by index
   std::vector< Node* > targets;          //!< its targets on this process, in NEST's order
@@ -177,20 +218,17 @@ public:
       const ProceduralRecord& r = *records_[ entry.record ];
       const std::uint64_t k = entry.count;
       e.set_port( l );
-      for ( std::uint64_t i = 0; i < k; ++i )
-      {
-        r.connection( zig_,
-          entry.source,
-          i,
-          [ & ]( const std::uint64_t t, const double weight, const double delay )
-          {
-            e.set_weight( weight );
-            e.set_delay_steps( Time::delay_ms_to_steps( delay ) );
-            e.set_receiver( *r.targets[ t ] );
-            e.set_rport( r.rport );
-            e();
-          } );
-      }
+      r.connections( zig_,
+        entry.source,
+        k,
+        [ & ]( const std::uint64_t t, const double weight, const double delay )
+        {
+          e.set_weight( weight );
+          e.set_delay_steps( Time::delay_ms_to_steps( delay ) );
+          e.set_receiver( *r.targets[ t ] );
+          e.set_rport( r.rport );
+          e();
+        } );
       delivered += k;
       if ( not entry.more_targets )
       {

@@ -2015,17 +2015,14 @@ nest::FixedTotalNumberBuilder::procedural_connect_()
           {
             with_connections.emplace_back( s, k );
             counted += k;
-            for ( std::uint64_t i = 0; i < k; ++i )
-            {
-              record->connection( zig,
-                s,
-                i,
-                [ & ]( const std::uint64_t, const double, const double d )
-                {
-                  dmin = std::min( dmin, d );
-                  dmax = std::max( dmax, d );
-                } );
-            }
+            record->connections( zig,
+              s,
+              k,
+              [ & ]( const std::uint64_t, const double, const double d )
+              {
+                dmin = std::min( dmin, d );
+                dmax = std::max( dmax, d );
+              } );
           } );
         assert( counted == total );
         DelayChecker& checker = kernel().connection_manager.get_delay_checker();

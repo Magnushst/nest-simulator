@@ -2003,16 +2003,17 @@ nest::FixedTotalNumberBuilder::procedural_connect_()
         auto record = std::make_unique< ProceduralRecord >(
           key, vp_id, sources_, std::move( targets ), total, weight, delay, rport );
 
-        // the sources with connections here, and the delay pass: every connection regenerated once, nothing stored
+        // the sources with connections here and their counts, and the delay pass: every connection regenerated once,
+        // nothing stored but each source's count
         const ProceduralZiggurat zig;
-        std::vector< std::uint64_t > with_connections;
+        std::vector< std::pair< std::uint64_t, std::uint64_t > > with_connections;
         std::uint64_t counted = 0;
         double dmin = std::numeric_limits< double >::infinity();
         double dmax = -std::numeric_limits< double >::infinity();
         record->shares.for_each_nonzero(
           [ & ]( const std::uint64_t s, const std::uint64_t k )
           {
-            with_connections.push_back( s );
+            with_connections.emplace_back( s, k );
             counted += k;
             for ( std::uint64_t i = 0; i < k; ++i )
             {

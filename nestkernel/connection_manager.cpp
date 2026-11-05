@@ -169,7 +169,7 @@ void
 nest::ConnectionManager::add_procedural_connections( const size_t tid,
   const synindex syn_id,
   std::unique_ptr< ProceduralRecord > record,
-  const std::vector< std::uint64_t >& sources_with_connections,
+  const std::vector< std::pair< std::uint64_t, std::uint64_t > >& sources_with_connections,
   const std::uint64_t connections )
 {
   if ( not connections_[ tid ][ syn_id ] )
@@ -181,10 +181,10 @@ nest::ConnectionManager::add_procedural_connections( const size_t tid,
   const std::uint32_t r = connector->add_record( std::move( record ) );
   const NodeCollectionPTR& sources = connector->record( r ).sources;
 
-  // one entry, and one source in the source table, per source with connections on this thread
-  for ( const std::uint64_t s : sources_with_connections )
+  // one entry, holding its count, and one source in the source table, per source with connections on this thread
+  for ( const auto& [ s, k ] : sources_with_connections )
   {
-    connector->add_entry( r, s );
+    connector->add_entry( r, s, k );
     source_table_.add_source( tid, syn_id, ( *sources )[ s ], /* is_primary */ true );
     increase_connection_count( tid, syn_id );
   }

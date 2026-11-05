@@ -25,11 +25,12 @@
  *
  * Projections of NEST's fixed_total_number rule with static synapses, regenerated instead of stored. Each virtual
  * process keeps, per projection, one record: its key, sources, local targets, its connections' count per source (a
- * share tree), its weight and delay laws and its receptor port. Each source with connections on a process has one entry
- * in the source table and in this connector, under the synapse type "static_synapse_procedural", so NEST's target
- * tables and compressed spikes route its events as for stored connections. When an event arrives, the connector
- * regenerates that source's connections on the process from the record's key and hands each event to its target as
- * static_synapse does. The same key gives the same connections at every delivery.
+ * share tree, walked once when building), its weight and delay laws and its receptor port. Each source with connections
+ * on a process has one entry in the source table and in this connector, under the synapse type
+ * "static_synapse_procedural", so NEST's target tables and compressed spikes route its events as for stored
+ * connections; the entry holds that source's count. When an event arrives, the connector regenerates that many
+ * connections from the record's key and hands each event to its target as static_synapse does. The same key gives the
+ * same connections at every delivery.
  *
  * Refused with NotImplemented: reading or setting single connections, plasticity, disconnection, devices.
  */
@@ -114,8 +115,9 @@ struct ProceduralRecord
 struct ProceduralEntry
 {
   std::uint32_t record;
-  bool more_targets; //!< the next entry has the same source (set by the source table)
-  std::uint64_t source; //!< index among the record's sources
+  std::uint32_t count : 31;       //!< how many, from the share tree when building, so that delivery walks no tree
+  std::uint32_t more_targets : 1; //!< the next entry has the same source (set by the source table)
+  std::uint64_t source;           //!< index among the record's sources
 };
 
 class ProceduralConnector : public ConnectorBase
@@ -140,9 +142,13 @@ public:
   }
 
   void
-  add_entry( const std::uint32_t r, const std::uint64_t source )
+  add_entry( const std::uint32_t r, const std::uint64_t source, const std::uint64_t count )
   {
-    entries_.push_back( ProceduralEntry { r, false, source } );
+    if ( count >= ( std::uint64_t { 1 } << 31 ) )
+    {
+      throw KernelException( "A regenerated entry holds at most 2^31 - 1 connections." );
+    }
+    entries_.push_back( ProceduralEntry { r, static_cast< std::uint32_t >( count ), 0, source } );
   }
 
   synindex
@@ -169,7 +175,7 @@ public:
     {
       const ProceduralEntry& entry = entries_[ l ];
       const ProceduralRecord& r = *records_[ entry.record ];
-      const std::uint64_t k = r.shares.share( entry.source );
+      const std::uint64_t k = entry.count;
       e.set_port( l );
       for ( std::uint64_t i = 0; i < k; ++i )
       {

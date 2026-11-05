@@ -266,12 +266,12 @@ public:
 
   /**
    * EXPERIMENTAL, NOT STOCK NEST: adds a regenerated projection's record on thread tid, with one connector entry and
-   * one source-table entry per source with connections there (procedural_connector.h).
+   * one source-table entry per source with connections there, given as (source index, its count) (procedural_connector.h).
    */
   void add_procedural_connections( const size_t tid,
     const synindex syn_id,
     std::unique_ptr< ProceduralRecord > record,
-    const std::vector< std::uint64_t >& sources_with_connections,
+    const std::vector< std::pair< std::uint64_t, std::uint64_t > >& sources_with_connections,
     const std::uint64_t connections );
 
   //! EXPERIMENTAL, NOT STOCK NEST: the synapse type whose connections are counted as regenerated ones.

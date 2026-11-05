@@ -172,23 +172,33 @@ struct ProceduralLanes
   alignas( 32 ) std::array< std::array< std::uint32_t, procedural_lanes >, 4 > w;
 };
 
+//! The eight lanes' keys, one array per key word: each lane may belong to another projection.
+struct ProceduralKeyLanes
+{
+  alignas( 32 ) std::array< std::array< std::uint32_t, procedural_lanes >, 2 > w;
+};
+
 /**
- * procedural_philox32 for eight counters at once: with AVX2 one register per counter word, the even and odd lanes'
- * 32 x 32 -> 64-bit products by _mm256_mul_epu32, recombined by blends, as the prototype engine computes them;
- * otherwise a loop. The numbers are exactly procedural_philox32's.
+ * procedural_philox32 for eight counters at once, each with its own key: with AVX2 one register per counter and key
+ * word, the even and odd lanes' 32 x 32 -> 64-bit products by _mm256_mul_epu32, recombined by blends, as the prototype
+ * engine computes them; otherwise a loop. The numbers are exactly procedural_philox32's.
  */
 inline void
-procedural_philox_lanes( ProceduralLanes& c, ProceduralKey32 k )
+procedural_philox_lanes( ProceduralLanes& c, const ProceduralKeyLanes& k )
 {
 #if defined( __AVX2__ )
-  const auto load = [ & ]( const std::size_t i )
-  { return _mm256_load_si256( reinterpret_cast< const __m256i* >( c.w[ i ].data() ) ); };
-  __m256i c0 = load( 0 );
-  __m256i c1 = load( 1 );
-  __m256i c2 = load( 2 );
-  __m256i c3 = load( 3 );
+  const auto load = []( const std::array< std::uint32_t, procedural_lanes >& w )
+  { return _mm256_load_si256( reinterpret_cast< const __m256i* >( w.data() ) ); };
+  __m256i c0 = load( c.w[ 0 ] );
+  __m256i c1 = load( c.w[ 1 ] );
+  __m256i c2 = load( c.w[ 2 ] );
+  __m256i c3 = load( c.w[ 3 ] );
+  __m256i k0 = load( k.w[ 0 ] );
+  __m256i k1 = load( k.w[ 1 ] );
   const __m256i m0 = _mm256_set1_epi32( static_cast< int >( 0xD2511F53u ) );
   const __m256i m1 = _mm256_set1_epi32( static_cast< int >( 0xCD9E8D57u ) );
+  const __m256i bump0 = _mm256_set1_epi32( static_cast< int >( 0x9E3779B9u ) );
+  const __m256i bump1 = _mm256_set1_epi32( static_cast< int >( 0xBB67AE85u ) );
   // the high and low 32 bits of m * x for each 32-bit lane of x
   const auto mul = []( const __m256i m, const __m256i x, __m256i& hi, __m256i& lo )
   {
@@ -201,15 +211,15 @@ procedural_philox_lanes( ProceduralLanes& c, ProceduralKey32 k )
   {
     if ( r > 0 )
     {
-      k[ 0 ] += 0x9E3779B9u;
-      k[ 1 ] += 0xBB67AE85u;
+      k0 = _mm256_add_epi32( k0, bump0 );
+      k1 = _mm256_add_epi32( k1, bump1 );
     }
     __m256i hi0, lo0, hi1, lo1;
     mul( m0, c0, hi0, lo0 );
     mul( m1, c2, hi1, lo1 );
-    c0 = _mm256_xor_si256( _mm256_xor_si256( hi1, c1 ), _mm256_set1_epi32( static_cast< int >( k[ 0 ] ) ) );
+    c0 = _mm256_xor_si256( _mm256_xor_si256( hi1, c1 ), k0 );
     c1 = lo1;
-    c2 = _mm256_xor_si256( _mm256_xor_si256( hi0, c3 ), _mm256_set1_epi32( static_cast< int >( k[ 1 ] ) ) );
+    c2 = _mm256_xor_si256( _mm256_xor_si256( hi0, c3 ), k1 );
     c3 = lo0;
   }
   const auto store = [ & ]( const std::size_t i, const __m256i v )
@@ -221,7 +231,8 @@ procedural_philox_lanes( ProceduralLanes& c, ProceduralKey32 k )
 #else
   for ( std::size_t l = 0; l < procedural_lanes; ++l )
   {
-    const ProceduralCtr32 r = procedural_philox32( { c.w[ 0 ][ l ], c.w[ 1 ][ l ], c.w[ 2 ][ l ], c.w[ 3 ][ l ] }, k );
+    const ProceduralCtr32 r = procedural_philox32(
+      { c.w[ 0 ][ l ], c.w[ 1 ][ l ], c.w[ 2 ][ l ], c.w[ 3 ][ l ] }, { k.w[ 0 ][ l ], k.w[ 1 ][ l ] } );
     for ( std::size_t i = 0; i < 4; ++i )
     {
       c.w[ i ][ l ] = r[ i ];
@@ -249,16 +260,23 @@ public:
   {
     if ( used_ == available_ )
     {
-      counter_[ 3 ] = block_++;
-      const ProceduralCtr32 b = procedural_philox32( counter_, key_ );
-      std::copy( b.begin(), b.end(), buffer_.begin() );
-      available_ = 4;
-      used_ = 0;
+      refill_();
     }
     return buffer_[ used_++ ];
   }
 
 private:
+  //! The counter's next block. Rarely needed, so kept out of line: inlined, part of its rounds ran for every connection.
+  __attribute__( ( noinline, cold ) ) void
+  refill_()
+  {
+    counter_[ 3 ] = block_++;
+    const ProceduralCtr32 b = procedural_philox32( counter_, key_ );
+    std::copy( b.begin(), b.end(), buffer_.begin() );
+    available_ = 4;
+    used_ = 0;
+  }
+
   ProceduralKey32 key_;
   ProceduralCtr32 counter_;
   std::array< std::uint32_t, 8 > buffer_;

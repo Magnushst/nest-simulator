@@ -93,46 +93,77 @@ struct ProceduralRecord
     }
   }
 
+  //! Puts connection i of source s (index s32 among the sources) into lane l: its counter for blocks 0 and 1, the key.
+  void
+  set_lane( ProceduralLanes& a,
+    ProceduralLanes& b,
+    ProceduralKeyLanes& keys,
+    const std::size_t l,
+    const std::uint32_t s32,
+    const std::uint32_t i ) const
+  {
+    const ProceduralCtr32 c = procedural_connection_counter( s32, static_cast< std::uint32_t >( vp ), i, 0 );
+    for ( std::size_t j = 0; j < 4; ++j )
+    {
+      a.w[ j ][ l ] = c[ j ];
+      b.w[ j ][ l ] = c[ j ];
+    }
+    b.w[ 3 ][ l ] = 1;
+    keys.w[ 0 ][ l ] = key32[ 0 ];
+    keys.w[ 1 ][ l ] = key32[ 1 ];
+  }
+
   /**
-   * Regenerates connections 0 to k - 1 of source s on this process, eight at a time. Their Philox4x32-10 blocks come
-   * from procedural_philox_lanes. Then come each one's target, uniform over the process's targets as in NEST's
-   * fixed_total_number, and its weight and delay by the laws. Only then is use( target index, weight, delay in ms )
-   * called for each, so that the targets' input buffers are written after the draws.
+   * From lane l's two blocks, connection i of source s32: its target, uniform over the process's targets as in NEST's
+   * fixed_total_number, then its weight and delay in ms by the laws. Delivery and the delay pass both draw here.
+   */
+  void
+  draw( const ProceduralZiggurat& z,
+    const ProceduralLanes& a,
+    const ProceduralLanes& b,
+    const std::size_t l,
+    const std::uint32_t s32,
+    const std::uint32_t i,
+    std::uint64_t& t,
+    double& wt,
+    double& d ) const
+  {
+    ProceduralWords32 w( key32,
+      procedural_connection_counter( s32, static_cast< std::uint32_t >( vp ), i, 0 ),
+      { a.w[ 0 ][ l ], a.w[ 1 ][ l ], a.w[ 2 ][ l ], a.w[ 3 ][ l ], b.w[ 0 ][ l ], b.w[ 1 ][ l ], b.w[ 2 ][ l ], b.w[ 3 ][ l ] } );
+    t = w.below( targets.size() );
+    wt = weight.draw( z, w );
+    d = delay.draw( z, w );
+  }
+
+  /**
+   * Regenerates connections 0 to k - 1 of source s on this process, eight at a time (the delay pass when building).
+   * Their blocks come from procedural_philox_lanes, then draw; only then is use( target index, weight, delay in ms )
+   * called for each.
    */
   template < typename F >
   void
   connections( const ProceduralZiggurat& z, const std::uint64_t s, const std::uint64_t k, F&& use ) const
   {
-    ProceduralLanes a;
-    ProceduralLanes b;
+    ProceduralLanes a {};
+    ProceduralLanes b {};
+    ProceduralKeyLanes keys {};
     std::array< std::uint64_t, procedural_lanes > t;
     std::array< double, procedural_lanes > wt;
     std::array< double, procedural_lanes > d;
     const auto s32 = static_cast< std::uint32_t >( s );
-    const auto vp32 = static_cast< std::uint32_t >( vp );
     for ( std::uint64_t i0 = 0; i0 < k; i0 += procedural_lanes )
     {
-      for ( std::size_t l = 0; l < procedural_lanes; ++l )
-      {
-        const ProceduralCtr32 c = procedural_connection_counter( s32, vp32, static_cast< std::uint32_t >( i0 + l ), 0 );
-        for ( std::size_t j = 0; j < 4; ++j )
-        {
-          a.w[ j ][ l ] = c[ j ];
-          b.w[ j ][ l ] = c[ j ];
-        }
-        b.w[ 3 ][ l ] = 1;
-      }
-      procedural_philox_lanes( a, key32 );
-      procedural_philox_lanes( b, key32 );
       const auto n = static_cast< std::size_t >( std::min< std::uint64_t >( procedural_lanes, k - i0 ) );
       for ( std::size_t l = 0; l < n; ++l )
       {
-        ProceduralWords32 w( key32,
-          procedural_connection_counter( s32, vp32, static_cast< std::uint32_t >( i0 + l ), 0 ),
-          { a.w[ 0 ][ l ], a.w[ 1 ][ l ], a.w[ 2 ][ l ], a.w[ 3 ][ l ], b.w[ 0 ][ l ], b.w[ 1 ][ l ], b.w[ 2 ][ l ], b.w[ 3 ][ l ] } );
-        t[ l ] = w.below( targets.size() );
-        wt[ l ] = weight.draw( z, w );
-        d[ l ] = delay.draw( z, w );
+        set_lane( a, b, keys, l, s32, static_cast< std::uint32_t >( i0 + l ) );
+      }
+      procedural_philox_lanes( a, keys );
+      procedural_philox_lanes( b, keys );
+      for ( std::size_t l = 0; l < n; ++l )
+      {
+        draw( z, a, b, l, s32, static_cast< std::uint32_t >( i0 + l ), t[ l ], wt[ l ], d[ l ] );
       }
       for ( std::size_t l = 0; l < n; ++l )
       {
@@ -207,33 +238,72 @@ public:
   /**
    * Delivers the event to every regenerated connection of the entries from lcid on that share its source, as
    * static_synapse::send does for each, and returns how many connections it reached (the cycle log counts them).
+   * The batches of eight are filled across those entries, in order, each lane with its own record's key and counter:
+   * the same draws as ProceduralRecord::connections, handed to the targets in the same order, but no partly empty batch
+   * per entry when entries hold few connections.
    */
   size_t
   send( const size_t, const size_t lcid, const std::vector< ConnectorModel* >&, Event& e ) override
   {
-    size_t delivered = 0;
-    for ( size_t l = lcid;; ++l )
+    struct Lane
     {
-      const ProceduralEntry& entry = entries_[ l ];
+      const ProceduralRecord* r;
+      size_t lcid;
+      std::uint32_t s;
+      std::uint32_t i;
+    };
+    std::array< Lane, procedural_lanes > lane;
+    ProceduralLanes a {};
+    ProceduralLanes b {};
+    ProceduralKeyLanes keys {};
+    std::array< std::uint64_t, procedural_lanes > t;
+    std::array< double, procedural_lanes > wt;
+    std::array< double, procedural_lanes > d;
+    std::size_t n = 0;
+    const auto deliver = [ & ]()
+    {
+      procedural_philox_lanes( a, keys );
+      procedural_philox_lanes( b, keys );
+      for ( std::size_t l = 0; l < n; ++l )
+      {
+        lane[ l ].r->draw( zig_, a, b, l, lane[ l ].s, lane[ l ].i, t[ l ], wt[ l ], d[ l ] );
+      }
+      for ( std::size_t l = 0; l < n; ++l )
+      {
+        const ProceduralRecord& r = *lane[ l ].r;
+        e.set_port( lane[ l ].lcid );
+        e.set_weight( wt[ l ] );
+        e.set_delay_steps( Time::delay_ms_to_steps( d[ l ] ) );
+        e.set_receiver( *r.targets[ t[ l ] ] );
+        e.set_rport( r.rport );
+        e();
+      }
+      n = 0;
+    };
+    size_t delivered = 0;
+    for ( size_t c = lcid;; ++c )
+    {
+      const ProceduralEntry& entry = entries_[ c ];
       const ProceduralRecord& r = *records_[ entry.record ];
-      const std::uint64_t k = entry.count;
-      e.set_port( l );
-      r.connections( zig_,
-        entry.source,
-        k,
-        [ & ]( const std::uint64_t t, const double weight, const double delay )
+      const auto s32 = static_cast< std::uint32_t >( entry.source );
+      for ( std::uint32_t i = 0; i < entry.count; ++i )
+      {
+        r.set_lane( a, b, keys, n, s32, i );
+        lane[ n ] = { &r, c, s32, i };
+        if ( ++n == procedural_lanes )
         {
-          e.set_weight( weight );
-          e.set_delay_steps( Time::delay_ms_to_steps( delay ) );
-          e.set_receiver( *r.targets[ t ] );
-          e.set_rport( r.rport );
-          e();
-        } );
-      delivered += k;
+          deliver();
+        }
+      }
+      delivered += entry.count;
       if ( not entry.more_targets )
       {
         break;
       }
+    }
+    if ( n > 0 )
+    {
+      deliver();
     }
     return delivered;
   }

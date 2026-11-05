@@ -500,6 +500,14 @@ nest::BipartiteConnBuilder::set_synapse_model_( const Dictionary& syn_params, si
     ? syn_params.get< std::string >( names::synapse_model )
     : std::string( "static_synapse" );
 
+  // EXPERIMENTAL, NOT STOCK NEST: the synapse type of regenerated connections is never named by the user
+  if ( syn_name == "static_synapse_procedural" )
+  {
+    throw NotImplemented(
+      "static_synapse_procedural cannot be named in Connect or Disconnect: its connections are made only by "
+      "fixed_total_number with \"procedural\": True, and cannot be disconnected." );
+  }
+
   // The following call will throw "UnknownSynapseType" if syn_name is not naming a known model
   const size_t synapse_model_id = kernel().model_manager.get_synapse_model_id( syn_name );
   synapse_model_id_[ synapse_indx ] = synapse_model_id;

@@ -181,6 +181,12 @@ ModelManager::copy_model( const std::string& old_name, const std::string& new_na
   }
   else if ( synapsedict_.known( old_name ) )
   {
+    // EXPERIMENTAL, NOT STOCK NEST: refused here, since the clone below runs in a parallel region, where an exception
+    // would end the process
+    if ( old_name == "static_synapse_procedural" )
+    {
+      throw NotImplemented( "CopyModel is not available for static_synapse_procedural." );
+    }
     const size_t old_id = synapsedict_.get< long >( old_name );
     copy_connection_model_( old_id, new_name, params );
   }

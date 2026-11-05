@@ -1399,6 +1399,12 @@ nest::ConnectionManager::get_connections( std::deque< ConnectionID >& connectome
   {
     return;
   }
+  // EXPERIMENTAL, NOT STOCK NEST: refused here, since the connector's refusal would come in the parallel region below,
+  // where an exception would end the process
+  if ( syn_id == procedural_syn_id_ )
+  {
+    throw NotImplemented( "GetConnections is not available for regenerated connections (static_synapse_procedural)." );
+  }
 
 #pragma omp parallel
   {

@@ -2007,26 +2007,43 @@ nest::FixedTotalNumberBuilder::procedural_connect_()
           rport );
 
         // the sources with connections here (each with its whole count) and the delay pass: every connection of this
-        // process regenerated once, nothing stored but each source's count
+        // process regenerated once, nothing stored but each source's count; a direct record (one or two classes
+        // here) keeps the source's count in each class instead, as this pass splits it, so delivery walks no tree
         const ProceduralZiggurat zig;
-        std::vector< std::pair< std::uint64_t, std::uint64_t > > with_connections;
+        std::vector< std::tuple< std::uint64_t, std::uint64_t, std::uint64_t > > with_connections;
         std::uint64_t here = 0;
         double dmin = std::numeric_limits< double >::infinity();
         double dmax = -std::numeric_limits< double >::infinity();
         record->shares.for_each_nonzero(
           [ & ]( const std::uint64_t s, const std::uint64_t k )
           {
-            const std::uint64_t n = record->connections( zig,
+            std::array< std::uint64_t, 2 > in_class { 0, 0 };
+            const std::uint64_t n = record->connections(
+              zig,
               s,
               k,
               [ & ]( Node*, const double, const double d )
               {
                 dmin = std::min( dmin, d );
                 dmax = std::max( dmax, d );
+              },
+              [ & ]( const std::uint32_t c, const std::uint64_t kc )
+              {
+                if ( record->direct )
+                {
+                  in_class.at( static_cast< std::size_t >( record->own_index[ c ] ) ) = kc;
+                }
               } );
             if ( n > 0 )
             {
-              with_connections.emplace_back( s, k );
+              if ( record->direct )
+              {
+                with_connections.emplace_back( s, in_class[ 1 ], in_class[ 0 ] );
+              }
+              else
+              {
+                with_connections.emplace_back( s, k, 0 );
+              }
               here += n;
             }
           } );

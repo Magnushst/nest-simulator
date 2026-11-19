@@ -13,6 +13,9 @@
   the regenerated connections keyed by the network alone, never by a process, and weights rounded to multiples of
   2⁻¹⁸ pA, so that the simulation is one at any number of virtual processes dividing 1,024. Version string
   `3.10.0+experimental.not.stock.procedural.invariant`.
+  A process with one or two classes (512 or more virtual processes) splits each source's count over its classes
+  once when building and keeps both counts in the entry, so delivery walks no class tree; the counts and the
+  simulation are unchanged (19 Nov 2026, `../NEST_INVARIANT.md`).
 - **Version string:** `3.10.0+experimental.not.stock.procedural.connections` (`VERSION`), so every build and log names
   it.
 - **Data:** only under `nest/nest_cluster_data/CHANGED_NEST_NOT_STOCK/EXPERIMENTAL-NOT-STOCK-procedural-connections/`,

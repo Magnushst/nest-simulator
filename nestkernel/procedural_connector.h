@@ -37,6 +37,8 @@
  * entry in the source table and in this connector, under the synapse type "static_synapse_procedural", so NEST's target
  * tables and compressed spikes route its events as for stored connections; the entry holds the source's whole count.
  * When an event arrives, the connector splits that count over the process's classes and regenerates their connections.
+ * A process with one or two classes (512 or more virtual processes) is split once when building instead: its entries
+ * hold the source's count in each of its classes, so delivery walks no tree; the counts are the same either way.
  *
  * Refused with NotImplemented: reading or setting single connections, plasticity, disconnection, devices.
  */
@@ -99,6 +101,8 @@ struct ProceduralRecord
     , class_prefix( procedural_classes + 1, 0 )
     , own_prefix( procedural_classes + 1, 0 )
     , own_index( procedural_classes, -1 )
+    , own( own_classes )
+    , direct( own_classes.size() <= 2 )
     , targets( std::move( own_targets ) )
     , shares( key_, procedural_all_processes, sources->size(), total )
     , weight( weight_ )
@@ -222,11 +226,12 @@ struct ProceduralRecord
 
   /**
    * Regenerates source s's connections on this process (its k connections split over the classes), eight at a time
-   * (the delay pass when building), calling use( target, weight, delay in ms ) for each; returns how many there were.
+   * (the delay pass when building), calling on_class( class, count ) for each of the process's classes with connections
+   * and use( target, weight, delay in ms ) for each connection; returns how many there were.
    */
-  template < typename F >
+  template < typename F, typename C >
   std::uint64_t
-  connections( const ProceduralZiggurat& z, const std::uint64_t s, const std::uint64_t k, F&& use ) const
+  connections( const ProceduralZiggurat& z, const std::uint64_t s, const std::uint64_t k, F&& use, C&& on_class ) const
   {
     ProceduralLanes a {};
     ProceduralLanes b {};
@@ -256,6 +261,7 @@ struct ProceduralRecord
       k,
       [ & ]( const std::uint32_t c, const std::uint64_t kc )
       {
+        on_class( c, kc );
         for ( std::uint64_t i = 0; i < kc; ++i )
         {
           set_lane( a, b, keys, n, s32, c, static_cast< std::uint32_t >( i ) );
@@ -281,6 +287,8 @@ struct ProceduralRecord
   std::vector< std::uint64_t > class_prefix;   //!< the projection's targets in the classes below c, over all processes
   std::vector< std::uint32_t > own_prefix;     //!< this process's classes below c
   std::vector< std::int32_t > own_index;       //!< a class's place in targets, or -1 if not this process's
+  std::vector< std::uint32_t > own;            //!< this process's classes with targets, in increasing order
+  bool direct;                                 //!< one or two classes here: entries hold each class's count
   std::vector< std::vector< Node* > > targets; //!< this process's classes' targets, each in node-id order
   ProceduralShareTree shares;                  //!< each source's connections, the same tree on every process
   ProceduralLaw weight;
@@ -292,10 +300,14 @@ struct ProceduralRecord
 struct ProceduralEntry
 {
   std::uint32_t record;
-  std::uint32_t count : 31;       //!< the source's whole count in the projection, which delivery splits over classes
+  //! the source's whole count in the projection, which delivery splits over classes; when the record is direct, its
+  //! count in the process's second class (0 with one class)
+  std::uint32_t count : 31;
   std::uint32_t more_targets : 1; //!< the next entry has the same source (set by the source table)
-  std::uint64_t source;           //!< index among the record's sources
+  std::uint32_t source;           //!< index among the record's sources (fewer than 2^32, checked when building)
+  std::uint32_t first;            //!< when the record is direct, the source's count in the process's first class
 };
+static_assert( sizeof( ProceduralEntry ) == 16, "a regenerated entry stays 16 bytes" );
 
 class ProceduralConnector : public ConnectorBase
 {
@@ -318,14 +330,19 @@ public:
     return *records_[ r ];
   }
 
+  //! Adds source's entry: its whole count, or for a direct record its counts in the process's second and first class.
   void
-  add_entry( const std::uint32_t r, const std::uint64_t source, const std::uint64_t count )
+  add_entry( const std::uint32_t r, const std::uint64_t source, const std::uint64_t count, const std::uint64_t first )
   {
-    if ( count >= ( std::uint64_t { 1 } << 31 ) )
+    if ( count >= ( std::uint64_t { 1 } << 31 ) or first >= ( std::uint64_t { 1 } << 31 ) )
     {
-      throw KernelException( "A regenerated entry holds at most 2^31 - 1 connections." );
+      throw KernelException( "A regenerated entry holds at most 2^31 - 1 connections per count." );
     }
-    entries_.push_back( ProceduralEntry { r, static_cast< std::uint32_t >( count ), 0, source } );
+    entries_.push_back( ProceduralEntry { r,
+      static_cast< std::uint32_t >( count ),
+      0,
+      static_cast< std::uint32_t >( source ),
+      static_cast< std::uint32_t >( first ) } );
   }
 
   synindex
@@ -390,22 +407,33 @@ public:
     {
       const ProceduralEntry& entry = entries_[ lc ];
       const ProceduralRecord& r = *records_[ entry.record ];
-      const auto s32 = static_cast< std::uint32_t >( entry.source );
-      r.class_counts( entry.source,
-        entry.count,
-        [ & ]( const std::uint32_t c, const std::uint64_t kc )
+      const std::uint32_t s32 = entry.source;
+      const auto per_class = [ & ]( const std::uint32_t c, const std::uint64_t kc )
+      {
+        for ( std::uint64_t i = 0; i < kc; ++i )
         {
-          for ( std::uint64_t i = 0; i < kc; ++i )
+          r.set_lane( a, b, keys, n, s32, c, static_cast< std::uint32_t >( i ) );
+          lane[ n ] = { &r, lc, s32, c, static_cast< std::uint32_t >( i ) };
+          if ( ++n == procedural_lanes )
           {
-            r.set_lane( a, b, keys, n, s32, c, static_cast< std::uint32_t >( i ) );
-            lane[ n ] = { &r, lc, s32, c, static_cast< std::uint32_t >( i ) };
-            if ( ++n == procedural_lanes )
-            {
-              deliver();
-            }
+            deliver();
           }
-          delivered += kc;
-        } );
+        }
+        delivered += kc;
+      };
+      if ( r.direct )
+      {
+        // the counts split when building, in increasing order of class as the tree gives them
+        per_class( r.own[ 0 ], entry.first );
+        if ( r.own.size() > 1 )
+        {
+          per_class( r.own[ 1 ], entry.count );
+        }
+      }
+      else
+      {
+        r.class_counts( s32, entry.count, per_class );
+      }
       if ( not entry.more_targets )
       {
         break;

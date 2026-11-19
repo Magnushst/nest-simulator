@@ -9,6 +9,10 @@
   95e45a0ba (NEST 3.10 plus the per-phase cycle timers). That tree is never changed; this is a separate clone made
   without hardlinks (4 Nov 2026).
 - **Branch:** `EXPERIMENTAL-NOT-STOCK-procedural-connections`. No git remotes; the owner adds one only to push.
+- **Branch `EXPERIMENTAL-NOT-STOCK-procedural-invariant`** (19 Nov 2026, from dc85de1ca; `../NEST_INVARIANT.md`):
+  the regenerated connections keyed by the network alone, never by a process, and weights rounded to multiples of
+  2⁻¹⁸ pA, so that the simulation is one at any number of virtual processes dividing 1,024. Version string
+  `3.10.0+experimental.not.stock.procedural.invariant`.
 - **Version string:** `3.10.0+experimental.not.stock.procedural.connections` (`VERSION`), so every build and log names
   it.
 - **Data:** only under `nest/nest_cluster_data/CHANGED_NEST_NOT_STOCK/EXPERIMENTAL-NOT-STOCK-procedural-connections/`,

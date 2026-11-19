@@ -1897,50 +1897,34 @@ nest::FixedTotalNumberBuilder::connect_()
   }
 }
 
-// EXPERIMENTAL, NOT STOCK NEST: fixed_total_number regenerated instead of stored (procedural_connector.h)
+// EXPERIMENTAL, NOT STOCK NEST: fixed_total_number regenerated instead of stored (procedural_connector.h); the
+// invariant branch: no split across processes, every draw keyed by the network alone (NEST_INVARIANT.md)
 void
 nest::FixedTotalNumberBuilder::procedural_connect_()
 {
-  // NEST's split of the N connections over virtual processes, as in connect_ above and with the same rank-synchronised
-  // draws, so that every process gets the share stock NEST gives it
-  const int M = kernel().vp_manager.get_num_virtual_processes();
-  const long size_targets = targets_->size();
-
-  std::vector< size_t > number_of_targets_on_vp( M, 0 );
-  std::vector< size_t > local_targets;
-  local_targets.reserve( size_targets / kernel().mpi_manager.get_num_processes() );
-  for ( size_t t = 0; t < targets_->size(); t++ )
+  const size_t M = kernel().vp_manager.get_num_virtual_processes();
+  if ( procedural_classes % M != 0 )
   {
-    int vp = kernel().vp_manager.node_id_to_vp( ( *targets_ )[ t ] );
-    ++number_of_targets_on_vp[ vp ];
-    if ( kernel().vp_manager.is_local_vp( vp ) )
-    {
-      local_targets.push_back( ( *targets_ )[ t ] );
-    }
+    throw NotImplemented( "\"procedural\" (the invariant branch) needs a number of virtual processes that divides "
+      + std::to_string( procedural_classes ) + "." );
   }
 
-  std::vector< long > num_conns_on_vp( M, 0 );
-  RngPtr grng = get_rank_synced_rng();
-  double sum_dist = 0.0;
-  unsigned int sum_partitions = 0;
-  binomial_distribution bino_dist;
-  for ( int k = 0; k < M; k++ )
+  // every class's size over all processes, and this rank's classes' targets in node-id order
+  std::vector< std::uint64_t > class_size( procedural_classes, 0 );
+  std::vector< std::vector< size_t > > class_ids( procedural_classes );
+  for ( size_t t = 0; t < targets_->size(); ++t )
   {
-    if ( N_ == sum_partitions )
+    const size_t id = ( *targets_ )[ t ];
+    const size_t c = id % procedural_classes;
+    ++class_size[ c ];
+    if ( kernel().vp_manager.is_local_vp( kernel().vp_manager.node_id_to_vp( id ) ) )
     {
-      break;
+      class_ids[ c ].push_back( id );
     }
-    if ( number_of_targets_on_vp[ k ] > 0 )
-    {
-      double num_local_targets = static_cast< double >( number_of_targets_on_vp[ k ] );
-      double p_local = num_local_targets / ( size_targets - sum_dist );
-
-      binomial_distribution::param_type param( N_ - sum_partitions, p_local );
-      num_conns_on_vp[ k ] = bino_dist( grng, param );
-    }
-
-    sum_dist += static_cast< double >( number_of_targets_on_vp[ k ] );
-    sum_partitions += static_cast< unsigned int >( num_conns_on_vp[ k ] );
+  }
+  for ( auto& ids : class_ids )
+  {
+    std::sort( ids.begin(), ids.end() );
   }
 
   // the projection's key, its synapse type, and its laws, resolved once; a default weight or delay is the synapse
@@ -1977,60 +1961,83 @@ nest::FixedTotalNumberBuilder::procedural_connect_()
     {
       const size_t vp_id = kernel().vp_manager.thread_to_vp( tid );
 
-      if ( kernel().vp_manager.is_local_vp( vp_id ) and num_conns_on_vp[ vp_id ] > 0 )
+      // this process's classes: those whose targets it holds (node n lies on process n mod M, and M divides the
+      // number of classes), with targets
+      std::vector< std::uint32_t > own_classes;
+      std::vector< std::vector< Node* > > own_targets;
+      if ( kernel().vp_manager.is_local_vp( vp_id ) )
       {
-        // the targets on this process, in NEST's order
-        std::vector< Node* > targets;
-        targets.reserve( number_of_targets_on_vp[ vp_id ] );
-        for ( const size_t tnode_id : local_targets )
+        for ( std::uint32_t c = static_cast< std::uint32_t >( vp_id ); c < procedural_classes;
+              c += static_cast< std::uint32_t >( M ) )
         {
-          if ( kernel().vp_manager.node_id_to_vp( tnode_id ) == vp_id )
+          if ( class_ids[ c ].empty() )
           {
-            targets.push_back( kernel().node_manager.get_node_or_proxy( tnode_id, tid ) );
+            continue;
           }
+          own_classes.push_back( c );
+          std::vector< Node* > nodes;
+          nodes.reserve( class_ids[ c ].size() );
+          for ( const size_t id : class_ids[ c ] )
+          {
+            nodes.push_back( kernel().node_manager.get_node_or_proxy( id, tid ) );
+          }
+          own_targets.push_back( std::move( nodes ) );
         }
-        assert( targets.size() == number_of_targets_on_vp[ vp_id ] );
+      }
 
+      if ( not own_classes.empty() and N_ > 0 )
+      {
         // neurons only, and the receptor port the connection check gives
         Node* const source = kernel().node_manager.get_node_or_proxy( ( *sources_ )[ 0 ], tid );
-        if ( not targets[ 0 ]->has_proxies() or not source->has_proxies() )
+        if ( not own_targets[ 0 ][ 0 ]->has_proxies() or not source->has_proxies() )
         {
           throw IllegalConnection( "\"procedural\" connects neurons only, not devices." );
         }
-        const size_t rport = source->send_test_event( *targets[ 0 ], 0, synapse_model_id_[ 0 ], true );
+        const size_t rport = source->send_test_event( *own_targets[ 0 ][ 0 ], 0, synapse_model_id_[ 0 ], true );
 
-        const std::uint64_t total = static_cast< std::uint64_t >( num_conns_on_vp[ vp_id ] );
-        auto record = std::make_unique< ProceduralRecord >(
-          key, vp_id, sources_, std::move( targets ), total, weight, delay, rport );
+        auto record = std::make_unique< ProceduralRecord >( key,
+          vp_id,
+          sources_,
+          class_size,
+          std::move( own_classes ),
+          std::move( own_targets ),
+          static_cast< std::uint64_t >( N_ ),
+          weight,
+          delay,
+          rport );
 
-        // the sources with connections here and their counts, and the delay pass: every connection regenerated once,
-        // nothing stored but each source's count
+        // the sources with connections here (each with its whole count) and the delay pass: every connection of this
+        // process regenerated once, nothing stored but each source's count
         const ProceduralZiggurat zig;
         std::vector< std::pair< std::uint64_t, std::uint64_t > > with_connections;
-        std::uint64_t counted = 0;
+        std::uint64_t here = 0;
         double dmin = std::numeric_limits< double >::infinity();
         double dmax = -std::numeric_limits< double >::infinity();
         record->shares.for_each_nonzero(
           [ & ]( const std::uint64_t s, const std::uint64_t k )
           {
-            with_connections.emplace_back( s, k );
-            counted += k;
-            record->connections( zig,
+            const std::uint64_t n = record->connections( zig,
               s,
               k,
-              [ & ]( const std::uint64_t, const double, const double d )
+              [ & ]( Node*, const double, const double d )
               {
                 dmin = std::min( dmin, d );
                 dmax = std::max( dmax, d );
               } );
+            if ( n > 0 )
+            {
+              with_connections.emplace_back( s, k );
+              here += n;
+            }
           } );
-        assert( counted == total );
-        DelayChecker& checker = kernel().connection_manager.get_delay_checker();
-        checker.assert_valid_delay_ms( dmin );
-        checker.assert_valid_delay_ms( dmax );
-
-        kernel().connection_manager.add_procedural_connections(
-          tid, psyn, std::move( record ), with_connections, total );
+        if ( here > 0 )
+        {
+          DelayChecker& checker = kernel().connection_manager.get_delay_checker();
+          checker.assert_valid_delay_ms( dmin );
+          checker.assert_valid_delay_ms( dmax );
+          kernel().connection_manager.add_procedural_connections(
+            tid, psyn, std::move( record ), with_connections, here );
+        }
       }
     }
     catch ( ... )

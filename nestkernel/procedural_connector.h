@@ -21,16 +21,22 @@
  */
 
 /*
- * EXPERIMENTAL, NOT STOCK NEST (regenerated connections, Stage A).
+ * EXPERIMENTAL, NOT STOCK NEST (regenerated connections, Stage A; this branch, EXPERIMENTAL-NOT-STOCK-procedural-
+ * invariant: one realisation at any number of virtual processes, NEST_INVARIANT.md).
  *
- * Projections of NEST's fixed_total_number rule with static synapses, regenerated instead of stored. Each virtual
- * process keeps, per projection, one record: its key, sources, local targets, its connections' count per source (a
- * share tree, walked once when building), its weight and delay laws and its receptor port. Each source with connections
- * on a process has one entry in the source table and in this connector, under the synapse type
- * "static_synapse_procedural", so NEST's target tables and compressed spikes route its events as for stored
- * connections; the entry holds that source's count. When an event arrives, the connector regenerates that many
- * connections from the record's key and hands each event to its target as static_synapse does. The same key gives the
- * same connections at every delivery.
+ * Projections of NEST's fixed_total_number rule with static synapses, regenerated instead of stored. The realisation is
+ * keyed by the network alone, never by a process:
+ * - each source's count, Multinomial(N; 1/n) over the n sources, from one share tree keyed by the projection;
+ * - a source's count split over procedural_classes classes of target (the node id modulo procedural_classes), in
+ *   proportion to the classes' targets, by a binomial tree keyed by (projection, tree node, source);
+ * - connection i of class c: its target uniform over the class's targets in node-id order, its weight rounded to a
+ *   multiple of 2^-18 pA (so every input sum is exact in any order) and its delay, keyed by (projection, source, c, i).
+ * NEST places node n on virtual process n mod P, so with P dividing procedural_classes each class lies on one process,
+ * which draws only its own classes. Each process keeps, per projection, one record: its key, sources, every class's
+ * size, its own classes' targets, the laws and its receptor port. Each source with connections on a process has one
+ * entry in the source table and in this connector, under the synapse type "static_synapse_procedural", so NEST's target
+ * tables and compressed spikes route its events as for stored connections; the entry holds the source's whole count.
+ * When an event arrives, the connector splits that count over the process's classes and regenerates their connections.
  *
  * Refused with NotImplemented: reading or setting single connections, plasticity, disconnection, devices.
  */
@@ -39,6 +45,8 @@
 #define PROCEDURAL_CONNECTOR_H
 
 // C++ includes:
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -64,13 +72,22 @@
 namespace nest
 {
 
+//! The classes of target, by node id modulo this number; a number of virtual processes must divide it.
+constexpr std::uint32_t procedural_classes = 1024;
+//! The share tree's process field for the one tree every process walks (no process's own).
+constexpr std::uint64_t procedural_all_processes = 0xFFFFFF;
+//! Weights are rounded to multiples of 1 / procedural_weight_scale pA.
+constexpr double procedural_weight_scale = 262144.0;
+
 //! One regenerated projection on one virtual process.
 struct ProceduralRecord
 {
   ProceduralRecord( const ProceduralWords::Philox::key_type& key_,
     const std::uint64_t vp_,
     NodeCollectionPTR sources_,
-    std::vector< Node* > targets_,
+    const std::vector< std::uint64_t >& class_size,
+    std::vector< std::uint32_t > own_classes,
+    std::vector< std::vector< Node* > > own_targets,
     const std::uint64_t total,
     const ProceduralLaw& weight_,
     const ProceduralLaw& delay_,
@@ -79,8 +96,11 @@ struct ProceduralRecord
     , key32( { static_cast< std::uint32_t >( key_[ 0 ] ), static_cast< std::uint32_t >( key_[ 1 ] ) } )
     , vp( vp_ )
     , sources( std::move( sources_ ) )
-    , targets( std::move( targets_ ) )
-    , shares( key_, vp_, sources->size(), total )
+    , class_prefix( procedural_classes + 1, 0 )
+    , own_prefix( procedural_classes + 1, 0 )
+    , own_index( procedural_classes, -1 )
+    , targets( std::move( own_targets ) )
+    , shares( key_, procedural_all_processes, sources->size(), total )
     , weight( weight_ )
     , delay( delay_ )
     , rport( rport_ )
@@ -91,22 +111,83 @@ struct ProceduralRecord
         "Regenerated connections need a seed and projection number below 2^32, fewer than 2^24 virtual processes "
         "and fewer than 2^32 sources per projection." );
     }
+    for ( std::uint32_t c = 0; c < procedural_classes; ++c )
+    {
+      class_prefix[ c + 1 ] = class_prefix[ c ] + class_size[ c ];
+    }
+    for ( std::size_t j = 0; j < own_classes.size(); ++j )
+    {
+      own_index[ own_classes[ j ] ] = static_cast< std::int32_t >( j );
+    }
+    for ( std::uint32_t c = 0; c < procedural_classes; ++c )
+    {
+      own_prefix[ c + 1 ] = own_prefix[ c ] + ( own_index[ c ] >= 0 ? 1 : 0 );
+    }
   }
 
-  //! Puts connection i of source s (index s32 among the sources) into lane l: its counter for blocks 0 and 1, the key.
+  /**
+   * Splits source s's k connections over the classes of target and calls use( class, count ) for each of this
+   * process's classes with connections, in increasing order of class. The tree is the same on every process: node v
+   * over the classes [lo, hi) splits at mid into 2v and 2v + 1, the left count Binomial(count, size of [lo, mid) /
+   * size of [lo, hi)) keyed by (projection, v, s); a process descends only into branches holding classes of its own.
+   */
+  template < typename F >
+  void
+  class_counts( const std::uint64_t s, const std::uint64_t k, F&& use ) const
+  {
+    struct Branch
+    {
+      std::uint64_t v, count;
+      std::uint32_t lo, hi;
+    };
+    std::array< Branch, 64 > stack;
+    std::size_t top = 0;
+    stack[ top++ ] = Branch { 1, k, 0, procedural_classes };
+    while ( top > 0 )
+    {
+      const Branch b = stack[ --top ];
+      if ( b.count == 0 or own_prefix[ b.hi ] == own_prefix[ b.lo ] )
+      {
+        continue;
+      }
+      if ( b.hi - b.lo == 1 )
+      {
+        use( b.lo, b.count );
+        continue;
+      }
+      const std::uint32_t mid = b.lo + ( b.hi - b.lo ) / 2;
+      const std::uint64_t in_left = class_prefix[ mid ] - class_prefix[ b.lo ];
+      const std::uint64_t in_all = class_prefix[ b.hi ] - class_prefix[ b.lo ];
+      std::uint64_t left = 0;
+      if ( in_left == in_all )
+      {
+        left = b.count;
+      }
+      else if ( in_left > 0 )
+      {
+        ProceduralWords w( key, procedural_counter( ProceduralStream::classes, b.v, s, 0 ) );
+        left = procedural_binomial( b.count, static_cast< double >( in_left ) / static_cast< double >( in_all ), w );
+      }
+      stack[ top++ ] = Branch { 2 * b.v + 1, b.count - left, mid, b.hi }; // the right half after the left
+      stack[ top++ ] = Branch { 2 * b.v, left, b.lo, mid };
+    }
+  }
+
+  //! Puts connection i of class c of source s32 into lane l: its counter for blocks 0 and 1, the key.
   void
   set_lane( ProceduralLanes& a,
     ProceduralLanes& b,
     ProceduralKeyLanes& keys,
     const std::size_t l,
     const std::uint32_t s32,
+    const std::uint32_t c,
     const std::uint32_t i ) const
   {
-    const ProceduralCtr32 c = procedural_connection_counter( s32, static_cast< std::uint32_t >( vp ), i, 0 );
+    const ProceduralCtr32 ctr = procedural_connection_counter( s32, c, i, 0 );
     for ( std::size_t j = 0; j < 4; ++j )
     {
-      a.w[ j ][ l ] = c[ j ];
-      b.w[ j ][ l ] = c[ j ];
+      a.w[ j ][ l ] = ctr[ j ];
+      b.w[ j ][ l ] = ctr[ j ];
     }
     b.w[ 3 ][ l ] = 1;
     keys.w[ 0 ][ l ] = key32[ 0 ];
@@ -114,8 +195,9 @@ struct ProceduralRecord
   }
 
   /**
-   * From lane l's two blocks, connection i of source s32: its target, uniform over the process's targets as in NEST's
-   * fixed_total_number, then its weight and delay in ms by the laws. Delivery and the delay pass both draw here.
+   * From lane l's two blocks, connection i of class c of source s32: its target, uniform over the class's targets in
+   * node-id order, then its weight (rounded to a multiple of 2^-18 pA) and delay in ms by the laws. Delivery and the
+   * delay pass both draw here.
    */
   void
   draw( const ProceduralZiggurat& z,
@@ -123,61 +205,84 @@ struct ProceduralRecord
     const ProceduralLanes& b,
     const std::size_t l,
     const std::uint32_t s32,
+    const std::uint32_t c,
     const std::uint32_t i,
-    std::uint64_t& t,
+    Node*& t,
     double& wt,
     double& d ) const
   {
     ProceduralWords32 w( key32,
-      procedural_connection_counter( s32, static_cast< std::uint32_t >( vp ), i, 0 ),
+      procedural_connection_counter( s32, c, i, 0 ),
       { a.w[ 0 ][ l ], a.w[ 1 ][ l ], a.w[ 2 ][ l ], a.w[ 3 ][ l ], b.w[ 0 ][ l ], b.w[ 1 ][ l ], b.w[ 2 ][ l ], b.w[ 3 ][ l ] } );
-    t = w.below( targets.size() );
-    wt = weight.draw( z, w );
+    const std::vector< Node* >& in_class = targets[ static_cast< std::size_t >( own_index[ c ] ) ];
+    t = in_class[ w.below( in_class.size() ) ];
+    wt = std::nearbyint( weight.draw( z, w ) * procedural_weight_scale ) / procedural_weight_scale;
     d = delay.draw( z, w );
   }
 
   /**
-   * Regenerates connections 0 to k - 1 of source s on this process, eight at a time (the delay pass when building).
-   * Their blocks come from procedural_philox_lanes, then draw; only then is use( target index, weight, delay in ms )
-   * called for each.
+   * Regenerates source s's connections on this process (its k connections split over the classes), eight at a time
+   * (the delay pass when building), calling use( target, weight, delay in ms ) for each; returns how many there were.
    */
   template < typename F >
-  void
+  std::uint64_t
   connections( const ProceduralZiggurat& z, const std::uint64_t s, const std::uint64_t k, F&& use ) const
   {
     ProceduralLanes a {};
     ProceduralLanes b {};
     ProceduralKeyLanes keys {};
-    std::array< std::uint64_t, procedural_lanes > t;
+    std::array< Node*, procedural_lanes > t;
     std::array< double, procedural_lanes > wt;
     std::array< double, procedural_lanes > d;
+    std::array< std::pair< std::uint32_t, std::uint32_t >, procedural_lanes > ci;
+    std::size_t n = 0;
     const auto s32 = static_cast< std::uint32_t >( s );
-    for ( std::uint64_t i0 = 0; i0 < k; i0 += procedural_lanes )
+    const auto flush = [ & ]()
     {
-      const auto n = static_cast< std::size_t >( std::min< std::uint64_t >( procedural_lanes, k - i0 ) );
-      for ( std::size_t l = 0; l < n; ++l )
-      {
-        set_lane( a, b, keys, l, s32, static_cast< std::uint32_t >( i0 + l ) );
-      }
       procedural_philox_lanes( a, keys );
       procedural_philox_lanes( b, keys );
       for ( std::size_t l = 0; l < n; ++l )
       {
-        draw( z, a, b, l, s32, static_cast< std::uint32_t >( i0 + l ), t[ l ], wt[ l ], d[ l ] );
+        draw( z, a, b, l, s32, ci[ l ].first, ci[ l ].second, t[ l ], wt[ l ], d[ l ] );
       }
       for ( std::size_t l = 0; l < n; ++l )
       {
         use( t[ l ], wt[ l ], d[ l ] );
       }
+      n = 0;
+    };
+    std::uint64_t here = 0;
+    class_counts( s,
+      k,
+      [ & ]( const std::uint32_t c, const std::uint64_t kc )
+      {
+        for ( std::uint64_t i = 0; i < kc; ++i )
+        {
+          set_lane( a, b, keys, n, s32, c, static_cast< std::uint32_t >( i ) );
+          ci[ n ] = { c, static_cast< std::uint32_t >( i ) };
+          if ( ++n == procedural_lanes )
+          {
+            flush();
+          }
+        }
+        here += kc;
+      } );
+    if ( n > 0 )
+    {
+      flush();
     }
+    return here;
   }
 
-  ProceduralWords::Philox::key_type key; //!< (seed, projection), for the share tree's Philox4x64
-  ProceduralKey32 key32;                 //!< the same, for the connections' Philox4x32-10
-  std::uint64_t vp;                      //!< the virtual process
-  NodeCollectionPTR sources;             //!< the projection's sources, by index
-  std::vector< Node* > targets;          //!< its targets on this process, in NEST's order
-  ProceduralShareTree shares;            //!< its connections per source on this process
+  ProceduralWords::Philox::key_type key;       //!< (seed, projection), for the trees' Philox4x64
+  ProceduralKey32 key32;                       //!< the same, for the connections' Philox4x32-10
+  std::uint64_t vp;                            //!< the virtual process
+  NodeCollectionPTR sources;                   //!< the projection's sources, by index
+  std::vector< std::uint64_t > class_prefix;   //!< the projection's targets in the classes below c, over all processes
+  std::vector< std::uint32_t > own_prefix;     //!< this process's classes below c
+  std::vector< std::int32_t > own_index;       //!< a class's place in targets, or -1 if not this process's
+  std::vector< std::vector< Node* > > targets; //!< this process's classes' targets, each in node-id order
+  ProceduralShareTree shares;                  //!< each source's connections, the same tree on every process
   ProceduralLaw weight;
   ProceduralLaw delay;
   size_t rport; //!< receptor port, as the connection check gave it
@@ -187,7 +292,7 @@ struct ProceduralRecord
 struct ProceduralEntry
 {
   std::uint32_t record;
-  std::uint32_t count : 31;       //!< how many, from the share tree when building, so that delivery walks no tree
+  std::uint32_t count : 31;       //!< the source's whole count in the projection, which delivery splits over classes
   std::uint32_t more_targets : 1; //!< the next entry has the same source (set by the source table)
   std::uint64_t source;           //!< index among the record's sources
 };
@@ -250,13 +355,14 @@ public:
       const ProceduralRecord* r;
       size_t lcid;
       std::uint32_t s;
+      std::uint32_t c;
       std::uint32_t i;
     };
     std::array< Lane, procedural_lanes > lane;
     ProceduralLanes a {};
     ProceduralLanes b {};
     ProceduralKeyLanes keys {};
-    std::array< std::uint64_t, procedural_lanes > t;
+    std::array< Node*, procedural_lanes > t;
     std::array< double, procedural_lanes > wt;
     std::array< double, procedural_lanes > d;
     std::size_t n = 0;
@@ -266,36 +372,40 @@ public:
       procedural_philox_lanes( b, keys );
       for ( std::size_t l = 0; l < n; ++l )
       {
-        lane[ l ].r->draw( zig_, a, b, l, lane[ l ].s, lane[ l ].i, t[ l ], wt[ l ], d[ l ] );
+        lane[ l ].r->draw( zig_, a, b, l, lane[ l ].s, lane[ l ].c, lane[ l ].i, t[ l ], wt[ l ], d[ l ] );
       }
       for ( std::size_t l = 0; l < n; ++l )
       {
-        const ProceduralRecord& r = *lane[ l ].r;
         e.set_port( lane[ l ].lcid );
         e.set_weight( wt[ l ] );
         e.set_delay_steps( Time::delay_ms_to_steps( d[ l ] ) );
-        e.set_receiver( *r.targets[ t[ l ] ] );
-        e.set_rport( r.rport );
+        e.set_receiver( *t[ l ] );
+        e.set_rport( lane[ l ].r->rport );
         e();
       }
       n = 0;
     };
     size_t delivered = 0;
-    for ( size_t c = lcid;; ++c )
+    for ( size_t lc = lcid;; ++lc )
     {
-      const ProceduralEntry& entry = entries_[ c ];
+      const ProceduralEntry& entry = entries_[ lc ];
       const ProceduralRecord& r = *records_[ entry.record ];
       const auto s32 = static_cast< std::uint32_t >( entry.source );
-      for ( std::uint32_t i = 0; i < entry.count; ++i )
-      {
-        r.set_lane( a, b, keys, n, s32, i );
-        lane[ n ] = { &r, c, s32, i };
-        if ( ++n == procedural_lanes )
+      r.class_counts( entry.source,
+        entry.count,
+        [ & ]( const std::uint32_t c, const std::uint64_t kc )
         {
-          deliver();
-        }
-      }
-      delivered += entry.count;
+          for ( std::uint64_t i = 0; i < kc; ++i )
+          {
+            r.set_lane( a, b, keys, n, s32, c, static_cast< std::uint32_t >( i ) );
+            lane[ n ] = { &r, lc, s32, c, static_cast< std::uint32_t >( i ) };
+            if ( ++n == procedural_lanes )
+            {
+              deliver();
+            }
+          }
+          delivered += kc;
+        } );
       if ( not entry.more_targets )
       {
         break;

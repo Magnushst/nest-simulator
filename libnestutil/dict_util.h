@@ -23,8 +23,13 @@
 #ifndef DICT_UTIL_H
 #define DICT_UTIL_H
 
+// C++ includes:
+#include <cstdint>
+#include <random>
+
 // Includes from nestkernel:
 #include "kernel_manager.h"
+#include "random_generators.h" // EXPERIMENTAL, NOT STOCK NEST (the invariant branch: RandomGenerator)
 #include "vp_manager_impl.h"
 
 #include "dictionary.h"
@@ -46,10 +51,20 @@ update_value_param( Dictionary const& d, const std::string& key, T& value, nest:
   if ( it != d.end() and std::holds_alternative< std::shared_ptr< nest::Parameter > >( it->second.item ) )
   {
     const auto param = d.get< ParameterPTR >( key );
-    const auto vp = kernel().vp_manager.node_id_to_vp( node->get_node_id() );
-    const auto tid = kernel().vp_manager.vp_to_thread( vp );
-    const auto rng = get_vp_specific_rng( tid );
-    value = param->value( rng, node );
+    // EXPERIMENTAL, NOT STOCK NEST (the invariant branch, NEST_INVARIANT.md): drawn from a generator keyed by the base
+    // seed, the node and the parameter's name (FNV-1a), not by the node's virtual process, so a node gets the same
+    // value at any number of processes
+    std::uint32_t name_hash = 2166136261u;
+    for ( const char c : key )
+    {
+      name_hash = ( name_hash ^ static_cast< unsigned char >( c ) ) * 16777619u;
+    }
+    const std::uint64_t id = node->get_node_id();
+    RandomGenerator< std::mt19937_64 > keyed( { static_cast< std::uint32_t >( kernel().random_manager.get_base_seed() ),
+      static_cast< std::uint32_t >( id ),
+      static_cast< std::uint32_t >( id >> 32 ),
+      name_hash } );
+    value = param->value( &keyed, node );
     return true;
   }
   else

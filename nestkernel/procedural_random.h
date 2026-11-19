@@ -361,8 +361,9 @@ enum class ProceduralStream : std::uint64_t
 {
   connection = 1, //!< one connection's target, weight and delay (Philox4x32-10, procedural_connection_counter)
   share = 2,      //!< (tree node, 0): a split of a projection's connections over its sources
-  classes = 3     //!< (tree node, source): a split of one source's connections over the classes of target
+  classes = 3,    //!< (tree node, source): a split of one source's connections over the classes of target
                   //!< (EXPERIMENTAL, NOT STOCK NEST: the invariant branch, procedural_connector.h)
+  drive = 4       //!< (target, step): a poisson_generator's count for one target at one step (the invariant branch)
 };
 
 inline ProceduralWords::Philox::ctr_type

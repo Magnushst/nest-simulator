@@ -22,11 +22,15 @@
 
 #include "poisson_generator.h"
 
+// C++ includes:
+#include <cmath>
+
 // Includes from nestkernel:
 #include "event_delivery_manager_impl.h"
 #include "exceptions.h"
 #include "kernel_manager.h"
 #include "nest_impl.h"
+#include "procedural_random.h" // EXPERIMENTAL, NOT STOCK NEST (the invariant branch)
 
 // Includes from libnestutil:
 #include "dict_util.h"
@@ -136,13 +140,33 @@ nest::poisson_generator::update( Time const& T, const long from, const long to )
   }
 }
 
+// EXPERIMENTAL, NOT STOCK NEST (the invariant branch, NEST_INVARIANT.md): the count is drawn by inversion of a uniform
+// keyed by (base seed, generator; target, step), not from the generator of the target's virtual process, and the
+// weight is rounded to a multiple of 2^-18 pA, so the target's input is the same at any number of processes.
 void
 nest::poisson_generator::event_hook( DSSpikeEvent& e )
 {
-  long n_spikes = V_.poisson_dist_( get_vp_specific_rng( get_thread() ) );
+  const double mean = Time::get_resolution().get_ms() * P_.rate_ * 1e-3;
+  const ProceduralWords::Philox::key_type key { { kernel().random_manager.get_base_seed(), get_node_id() } };
+  ProceduralWords w( key,
+    procedural_counter( ProceduralStream::drive,
+      e.get_receiver().get_node_id(),
+      static_cast< std::uint64_t >( e.get_stamp().get_steps() ),
+      0 ) );
+  const double x = w.closed_open();
+  long n_spikes = 0;
+  double p = std::exp( -mean );
+  double f = p;
+  while ( x >= f and n_spikes < 1000 )
+  {
+    ++n_spikes;
+    p *= mean / static_cast< double >( n_spikes );
+    f += p;
+  }
 
   if ( n_spikes > 0 )  // we must not send events with multiplicity 0
   {
+    e.set_weight( std::nearbyint( e.get_weight() * 262144.0 ) / 262144.0 );
     e.set_multiplicity( n_spikes );
     e.get_receiver().handle( e );
   }

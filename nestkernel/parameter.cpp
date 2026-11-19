@@ -99,6 +99,10 @@ NormalParameter::value( RngPtr rng, Node* node )
 {
   const auto tid = node ? kernel().vp_manager.vp_to_thread( kernel().vp_manager.node_id_to_vp( node->get_node_id() ) )
                         : kernel().vp_manager.get_thread_id();
+  // EXPERIMENTAL, NOT STOCK NEST (the invariant branch): the value comes from rng alone, never from a value the
+  // distribution kept from its last call, which dict_util.h's generator keyed per node would otherwise pass on to the
+  // next node in an order that depends on the decomposition
+  normal_dists_[ tid ].reset();
   return normal_dists_[ tid ]( rng );
 }
 
@@ -125,6 +129,10 @@ LognormalParameter::value( RngPtr rng, Node* node )
 {
   const auto tid = node ? kernel().vp_manager.vp_to_thread( kernel().vp_manager.node_id_to_vp( node->get_node_id() ) )
                         : kernel().vp_manager.get_thread_id();
+  // EXPERIMENTAL, NOT STOCK NEST (the invariant branch): the value comes from rng alone, never from a value the
+  // distribution kept from its last call, which dict_util.h's generator keyed per node would otherwise pass on to the
+  // next node in an order that depends on the decomposition
+  lognormal_dists_[ tid ].reset();
   return lognormal_dists_[ tid ]( rng );
 }
 

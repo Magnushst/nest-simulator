@@ -1777,7 +1777,7 @@ nest::ConnectionManager::collect_compressed_spike_data( const size_t tid )
     kernel().get_omp_synchronization_construction_stopwatch().stop();
 #pragma omp single
     {
-      source_table_.fill_compressed_spike_data( compressed_spike_data_ );
+      source_table_.fill_compressed_spike_data( compressed_spike_data_, compressed_spike_data_stride_ );
     }  // of omp single; implicit barrier
   }
 }
@@ -1848,7 +1848,8 @@ nest::ConnectionManager::fill_target_buffer( const size_t tid,
       {
         const auto target_thread = source_2_idx->second.get_target_thread();
         const SpikeData& conn_info =
-          compressed_spike_data_[ syn_id ][ source_2_idx->second.get_source_index() ][ target_thread ];
+          compressed_spike_data_[ syn_id ][ source_2_idx->second.get_source_index() * compressed_spike_data_stride_
+            + target_thread ];
         assert( target_thread == static_cast< unsigned long >( conn_info.get_tid() ) );
         const size_t relative_recv_buffer_pos =
           get_secondary_recv_buffer_position( target_thread, syn_id, conn_info.get_lcid() )

@@ -542,10 +542,12 @@ nest::SourceTable::dump_compressible_sources() const
 }
 
 void
-nest::SourceTable::fill_compressed_spike_data(
-  std::vector< std::vector< std::vector< SpikeData > > >& compressed_spike_data )
+nest::SourceTable::fill_compressed_spike_data( std::vector< std::vector< SpikeData > >& compressed_spike_data,
+  size_t& stride )
 {
   const size_t num_synapse_models = kernel().model_manager.get_num_connection_models();
+  const size_t num_threads = kernel().vp_manager.get_num_threads();
+  stride = num_threads;
   compressed_spike_data.clear();
   compressed_spike_data.resize( num_synapse_models );
   compressed_spike_data_map_.clear();
@@ -555,35 +557,48 @@ nest::SourceTable::fill_compressed_spike_data(
   // store in compressed_spike_data one SpikeData entry for each local thread that
   // owns a local target. In compressed_spike_data_map_ store index into compressed_spike_data[syn_id]
   // where data for a given source is stored.
+  //
+  // EXPERIMENTAL, NOT STOCK: the entries of all sources of a synapse type lie in one flat array,
+  // source index * num_threads + target thread, allocated once at its final size. Pass 1 assigns the
+  // source indices exactly as stock NEST does (in the order the sources are met, with the same map
+  // entries); pass 2 stores the entries. Every index and every entry is the same as in stock NEST;
+  // only where the entries lie in memory differs.
 
   // TODO: I believe that at this point compressible_sources_ is ordered by source gid.
   //       Maybe one can exploit that to avoid searching with find() below.
   for ( synindex syn_id = 0; syn_id < kernel().model_manager.get_num_connection_models(); ++syn_id )
   {
+    size_t num_sources = 0;
     for ( size_t target_thread = 0; target_thread < static_cast< size_t >( compressible_sources_.size() );
       ++target_thread )
     {
       for ( const auto& connection : compressible_sources_[ target_thread ][ syn_id ] )
       {
         const auto source_gid = connection.first;
-
         if ( compressed_spike_data_map_[ syn_id ].find( source_gid ) == compressed_spike_data_map_[ syn_id ].end() )
         {
-          // Set up entry for new source
-          const auto new_source_index = compressed_spike_data[ syn_id ].size();
-
-          compressed_spike_data[ syn_id ].emplace_back( kernel().vp_manager.get_num_threads(),
-            SpikeData( invalid_targetindex, invalid_synindex, invalid_lcid, 0 ) );
-
           compressed_spike_data_map_[ syn_id ].insert(
-            std::make_pair( source_gid, CSDMapEntry( new_source_index, target_thread ) ) );
+            std::make_pair( source_gid, CSDMapEntry( num_sources, target_thread ) ) );
+          ++num_sources;
         }
+      }
+    }
 
+    compressed_spike_data[ syn_id ].assign(
+      num_sources * num_threads, SpikeData( invalid_targetindex, invalid_synindex, invalid_lcid, 0 ) );
+
+    for ( size_t target_thread = 0; target_thread < static_cast< size_t >( compressible_sources_.size() );
+      ++target_thread )
+    {
+      for ( const auto& connection : compressible_sources_[ target_thread ][ syn_id ] )
+      {
+        const auto source_gid = connection.first;
         const auto source_index = compressed_spike_data_map_[ syn_id ].find( source_gid )->second.get_source_index();
 
-        assert( compressed_spike_data[ syn_id ][ source_index ][ target_thread ].get_lcid() == invalid_lcid );
+        assert( compressed_spike_data[ syn_id ][ source_index * num_threads + target_thread ].get_lcid()
+          == invalid_lcid );
 
-        compressed_spike_data[ syn_id ][ source_index ][ target_thread ] = connection.second;
+        compressed_spike_data[ syn_id ][ source_index * num_threads + target_thread ] = connection.second;
       }  // for connection
 
       compressible_sources_[ target_thread ][ syn_id ].clear();
@@ -595,7 +610,8 @@ nest::SourceTable::fill_compressed_spike_data(
 // Argument name only needed if full logging is activated. Macro-protect to avoid unused argument warning.
 void
 nest::SourceTable::dump_compressed_spike_data(
-  const std::vector< std::vector< std::vector< SpikeData > > >& FULL_LOGGING_ONLY( compressed_spike_data ) ) const
+  const std::vector< std::vector< SpikeData > >& FULL_LOGGING_ONLY( compressed_spike_data ),
+  const size_t FULL_LOGGING_ONLY( stride ) ) const
 {
   FULL_LOGGING_ONLY(
     for ( const auto& tab : compressed_spike_data_map_ ) {
@@ -611,17 +627,17 @@ nest::SourceTable::dump_compressed_spike_data(
     }
 
     for ( const auto& tab : compressed_spike_data ) {
-      for ( size_t six = 0; six < tab.size(); ++six )
+      for ( size_t six = 0; stride > 0 and six < tab.size() / stride; ++six )
       {
-        for ( size_t tx = 0; tx < tab[ six ].size(); ++tx )
+        for ( size_t tx = 0; tx < stride; ++tx )
         {
           kernel().write_to_dump( String::compose( "csd  : r%1 t%2 six%3 tx%4 l%5 tt%6",
             kernel().mpi_manager.get_rank(),
             kernel().vp_manager.get_thread_id(),
             six,
             tx,
-            tab[ six ][ tx ].get_lcid(),
-            tab[ six ][ tx ].get_tid() ) );
+            tab[ six * stride + tx ].get_lcid(),
+            tab[ six * stride + tx ].get_tid() ) );
         }
       }
     } )

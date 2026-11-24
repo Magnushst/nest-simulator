@@ -350,14 +350,15 @@ public:
   // creates maps of sources with more than one thread-local target
   void collect_compressible_sources( const size_t tid );
   // fills the compressed_spike_data structure in ConnectionManager
-  void fill_compressed_spike_data( std::vector< std::vector< std::vector< SpikeData > > >& compressed_spike_data );
+  // EXPERIMENTAL, NOT STOCK: fills one flat array per synapse type and returns its stride (entries per source)
+  void fill_compressed_spike_data( std::vector< std::vector< SpikeData > >& compressed_spike_data, size_t& stride );
 
   void clear_compressed_spike_data_map();
 
   void dump_sources() const;
   void dump_compressible_sources() const;
-  void dump_compressed_spike_data(
-    const std::vector< std::vector< std::vector< SpikeData > > >& compressed_spike_data ) const;
+  void dump_compressed_spike_data( const std::vector< std::vector< SpikeData > >& compressed_spike_data,
+    const size_t stride ) const;
 };
 
 inline void

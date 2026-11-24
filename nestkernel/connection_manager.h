@@ -461,7 +461,8 @@ public:
   // start and stop in high-level connect functions in nestmodule.cpp and nest.cpp
   Stopwatch< StopwatchGranularity::Normal, StopwatchParallelism::MasterOnly > sw_construction_connect;
 
-  const std::vector< SpikeData >& get_compressed_spike_data( const synindex syn_id, const size_t idx );
+  // EXPERIMENTAL, NOT STOCK: the source's entries for all threads, as a pointer into one flat array per synapse type
+  const SpikeData* get_compressed_spike_data( const synindex syn_id, const size_t idx ) const;
 
   //! Set iteration_state_ entries for all threads to beginning of compressed_spike_data_map_.
   void initialize_iteration_state();
@@ -637,10 +638,15 @@ private:
 
   /**
    * A structure to hold "unpacked" spikes on the postsynaptic side if
-   * spike compression is enabled. Internally arranged in a 3d
-   * structure: synapses|sources|target_threads
+   * spike compression is enabled.
+   * EXPERIMENTAL, NOT STOCK: one flat array per synapse type, indexed
+   * source index * compressed_spike_data_stride_ + target thread, instead of
+   * one separately allocated vector per source (stock: synapses|sources|target_threads).
    */
-  std::vector< std::vector< std::vector< SpikeData > > > compressed_spike_data_;
+  std::vector< std::vector< SpikeData > > compressed_spike_data_;
+
+  //! EXPERIMENTAL, NOT STOCK: entries per source in compressed_spike_data_ (the number of threads when it was filled)
+  size_t compressed_spike_data_stride_ = 0;
 
   /**
    * Stores absolute position in receive buffer of secondary events.
@@ -937,10 +943,10 @@ ConnectionManager::set_source_has_more_targets( const size_t tid,
   connections_[ tid ][ syn_id ]->set_source_has_more_targets( lcid, more_targets );
 }
 
-inline const std::vector< SpikeData >&
-ConnectionManager::get_compressed_spike_data( const synindex syn_id, const size_t idx )
+inline const SpikeData*
+ConnectionManager::get_compressed_spike_data( const synindex syn_id, const size_t idx ) const
 {
-  return compressed_spike_data_[ syn_id ][ idx ];
+  return compressed_spike_data_[ syn_id ].data() + idx * compressed_spike_data_stride_;
 }
 
 inline void

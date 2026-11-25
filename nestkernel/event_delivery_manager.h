@@ -619,6 +619,8 @@ private:
   size_t async_messages_sent_ = 0;
   size_t async_messages_received_ = 0;
   long async_largest_lead_ = -1;
+  //! EXPERIMENTAL: slices that began with another rank's messages in for 0, 1 or 2 slices later (check 7)
+  size_t async_lead_histogram_[ 3 ] = { 0, 0, 0 };
   //! the lockstep arm: the same messages, completed inside the slice
   bool lockstep_p2p_ = false;
   //! the master's cumulative exchange times in seconds, and the bytes it posted

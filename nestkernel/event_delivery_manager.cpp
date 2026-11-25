@@ -124,6 +124,7 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
     async_messages_sent_ = 0;
     async_messages_received_ = 0;
     async_largest_lead_ = -1;
+    async_lead_histogram_[ 0 ] = async_lead_histogram_[ 1 ] = async_lead_histogram_[ 2 ] = 0;
     async_expected_.clear();
     async_held_.clear();
     lockstep_p2p_ = mode != nullptr and std::string( mode ) == "lockstep_p2p";
@@ -311,6 +312,13 @@ EventDeliveryManager::get_status( Dictionary& dict )
   std::ostringstream state;
   state << std::hex << std::setw( 16 ) << std::setfill( '0' ) << kernel().simulation_manager.experimental_state_digest();
   dict[ std::string( "experimental_state_digest" ) ] = state.str();
+  // EXPERIMENTAL, NOT STOCK: the point-to-point exchange's statistics (check 7)
+  dict[ std::string( "experimental_exchange_stamps" ) ] = static_cast< long >( async_stamps_ );
+  dict[ std::string( "experimental_exchange_messages_sent" ) ] = static_cast< long >( async_messages_sent_ );
+  dict[ std::string( "experimental_exchange_messages_received" ) ] =
+    static_cast< long >( async_messages_received_ );
+  dict[ std::string( "experimental_exchange_lead" ) ] = std::to_string( async_lead_histogram_[ 0 ] ) + ","
+    + std::to_string( async_lead_histogram_[ 1 ] ) + "," + std::to_string( async_lead_histogram_[ 2 ] );
 }
 
 void
@@ -1517,6 +1525,7 @@ EventDeliveryManager::async_receive_( const long stamp )
       }
     }
     async_largest_lead_ = std::max( async_largest_lead_, lead );
+    ++async_lead_histogram_[ lead ];
   }
   const auto assembly_start = std::chrono::steady_clock::now();
   // NEST's receive buffer: one chunk per rank of a common size, the last entry marked as the end, an empty chunk as

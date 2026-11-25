@@ -1425,12 +1425,14 @@ EventDeliveryManager::async_receive_( const long stamp )
   async_messages_received_ += num_processes;
   if ( async_stats_ )
   {
-    // another rank's message for stamp + 2 (+ 3) here means it finished slice stamp (+ 1) before this one began it
+    // another rank's message for key stamp + 2L (+ 3L) here means it finished the slice ending at stamp + L (+ 2L)
+    // while this one was finishing the slice before: a lead of one (two) slices
+    const long interval = kernel().connection_manager.get_min_delay();
     long lead = 0;
     for ( long ahead = 1; ahead <= 2; ++ahead )
     {
       int flag = 0;
-      MPI_Iprobe( MPI_ANY_SOURCE, async_tag( stamp + 1 + ahead ), async_comm(), &flag, MPI_STATUS_IGNORE );
+      MPI_Iprobe( MPI_ANY_SOURCE, async_tag( stamp + ( 1 + ahead ) * interval ), async_comm(), &flag, MPI_STATUS_IGNORE );
       if ( flag )
       {
         lead = ahead;

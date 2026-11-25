@@ -1065,6 +1065,8 @@ nest::SimulationManager::update_()
       }
       if ( plain_ and not fused_decided_ )
       {
+        // every thread reads the flag above before the master sets it below
+#pragma omp barrier
 #pragma omp master
         {
           // EXPERIMENTAL, NOT STOCK: the plain exchange's opening block: the call's first slice's spikes

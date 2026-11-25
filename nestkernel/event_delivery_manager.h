@@ -143,6 +143,9 @@ public:
    */
   void async_send( const long stamp );
 
+  //! EXPERIMENTAL: receive and hold every stamp in flight, and complete all sends (end of a Run call). Master only.
+  void async_settle();
+
   //! EXPERIMENTAL: whether the lockstep arm is on (NEST_ASYNC=lockstep_p2p).
   bool
   lockstep_p2p() const
@@ -626,6 +629,8 @@ private:
   size_t async_bytes_sent_ = 0;
   //! stamps whose messages are in flight
   std::set< long > async_expected_;
+  //! stamps received by async_settle(), held for the slice that delivers them, with their chunk size
+  std::map< long, std::pair< std::vector< SpikeData >, size_t > > async_held_;
 #ifdef HAVE_MPI
   //! send buffers and requests of the messages posted, by stamp
   std::map< long, std::pair< std::vector< std::vector< SpikeData > >, std::vector< MPI_Request > > > async_sent_;

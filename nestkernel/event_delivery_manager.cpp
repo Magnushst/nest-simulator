@@ -125,6 +125,7 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
     async_messages_received_ = 0;
     async_largest_lead_ = -1;
     async_expected_.clear();
+    async_held_.clear();
     lockstep_p2p_ = mode != nullptr and std::string( mode ) == "lockstep_p2p";
     async_time_post_ = 0.0;
     async_time_wait_ = 0.0;
@@ -1280,11 +1281,23 @@ EventDeliveryManager::prepare_fused_delivery( const long stamp )
 {
   if ( async_ )
   {
-    // EXPERIMENTAL, NOT STOCK: the counted completion of this stamp's messages; own sends complete two slices late
-    fused_deliver_ready_ = async_expected_.count( stamp ) > 0;
-    if ( fused_deliver_ready_ )
+    // EXPERIMENTAL, NOT STOCK: the counted completion of this stamp's messages, or the stamp held since the end of
+    // the last Run call; own sends complete two slices late
+    const auto held = async_held_.find( stamp );
+    if ( held != async_held_.end() )
     {
-      async_receive_( stamp );
+      fused_deliver_buffer_ = std::move( held->second.first );
+      fused_deliver_chunk_ = held->second.second;
+      async_held_.erase( held );
+      fused_deliver_ready_ = true;
+    }
+    else
+    {
+      fused_deliver_ready_ = async_expected_.count( stamp ) > 0;
+      if ( fused_deliver_ready_ )
+      {
+        async_receive_( stamp );
+      }
     }
     async_complete_sends_( stamp - 2 * kernel().connection_manager.get_min_delay() );
     return;
@@ -1383,6 +1396,20 @@ EventDeliveryManager::lockstep_p2p_exchange( const long stamp )
   async_receive_( stamp );
   async_complete_sends_( stamp );
   fused_deliver_ready_ = true;
+}
+
+void
+EventDeliveryManager::async_settle()
+{
+  // EXPERIMENTAL, NOT STOCK: at the end of a Run call nothing may stay pending (Cleanup, Prepare, MPI_Finalize)
+  while ( not async_expected_.empty() )
+  {
+    const long stamp = *async_expected_.begin();
+    async_receive_( stamp );  // erases the stamp from async_expected_
+    async_held_[ stamp ] = std::make_pair( std::move( fused_deliver_buffer_ ), fused_deliver_chunk_ );
+    fused_deliver_buffer_.clear();
+  }
+  async_complete_sends_( std::numeric_limits< long >::max() );
 }
 
 void

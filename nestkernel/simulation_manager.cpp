@@ -1547,11 +1547,16 @@ nest::SimulationManager::update_()
 
       if ( fused_ or plain_ )
       {
-        // EXPERIMENTAL, NOT STOCK: the call's last slice ran no decision half, and received nothing
+        // EXPERIMENTAL, NOT STOCK: the call's last slice ran no decision half, and received nothing; the stamps
+        // still in flight are received and held, and every send completed, so nothing is pending after the call
 #pragma omp barrier
 #pragma omp master
         {
           fused_decided_ = false;
+          if ( kernel().event_delivery_manager.async_exchange() )
+          {
+            kernel().event_delivery_manager.async_settle();
+          }
         }
 #pragma omp barrier
       }

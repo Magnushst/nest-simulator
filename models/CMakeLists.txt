@@ -27,6 +27,7 @@ set(models_sources
     rate_neuron_opn.h rate_neuron_opn_impl.h
     rate_transformer_node.h rate_transformer_node_impl.h
     weight_optimizer.h weight_optimizer.cpp
+    order_certified_drive.h order_certified_drive.cpp # EXPERIMENTAL-NOT-STOCK (order-certified step)
     ${MODELS_SOURCES_GENERATED}
 )
 

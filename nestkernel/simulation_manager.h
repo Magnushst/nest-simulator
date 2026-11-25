@@ -27,6 +27,8 @@
 #include <sys/time.h>
 
 // C++ includes:
+#include <atomic>
+#include <cstddef>
 #include <vector>
 
 // Includes from libnestutil:
@@ -41,6 +43,13 @@
 
 namespace nest
 {
+
+/**
+ * EXPERIMENTAL-NOT-STOCK (order-certified step): called by each thread at the start of its update phase, before any node is updated. Set by the models
+ * library (order_certified_drive.cpp); null in stock behaviour.
+ */
+using OrderCertifiedPrepass = void ( * )( size_t tid, const Time& origin, long from, long to );
+extern std::atomic< OrderCertifiedPrepass > order_certified_update_prepass;
 class Node;
 
 class SimulationManager : public ManagerInterface

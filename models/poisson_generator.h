@@ -110,6 +110,18 @@ public:
   StimulationDevice::Type get_type() const override;
   void set_data_from_stimulation_backend( std::vector< double >& input_param ) override;
 
+  /**
+   * EXPERIMENTAL-NOT-STOCK (order-certified step): the draws of update() and event_hook() for one slice, in the same order (lag, then the
+   * given targets in connection order), written to counts[target * slice_len + lag - from] instead of being sent.
+   */
+  void order_certified_draw( size_t tid,
+    const Time& origin,
+    long from,
+    long to,
+    const std::vector< size_t >& targets,
+    std::vector< unsigned long >& counts,
+    long slice_len );
+
 private:
   void init_state_() override;
   void init_buffers_() override;

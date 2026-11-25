@@ -43,6 +43,9 @@
 #include "stopwatch_impl.h"
 
 
+// EXPERIMENTAL-NOT-STOCK (order-certified step): see simulation_manager.h.
+std::atomic< nest::OrderCertifiedPrepass > nest::order_certified_update_prepass { nullptr };
+
 nest::SimulationManager::SimulationManager()
   : clock_( Time::tic( 0L ) )
   , slice_( 0L )
@@ -1094,6 +1097,11 @@ nest::SimulationManager::update_()
         }  // of structural plasticity
 
         sw_update_.start();
+        // EXPERIMENTAL-NOT-STOCK (order-certified step): the drive's draws of this slice, in the reference order, before any node is updated.
+        if ( const OrderCertifiedPrepass prepass = order_certified_update_prepass.load( std::memory_order_acquire ) )
+        {
+          prepass( tid, clock_, from_step_, to_step_ );
+        }
         const SparseNodeArray& thread_local_nodes = kernel().node_manager.get_local_nodes( tid );
 
         for ( SparseNodeArray::const_iterator n = thread_local_nodes.begin(); n != thread_local_nodes.end(); ++n )

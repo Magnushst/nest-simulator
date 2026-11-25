@@ -32,6 +32,7 @@
 #include "exceptions.h"
 #include "iaf_propagator.h"
 #include "kernel_manager.h"
+#include "order_certified_drive.h"  // EXPERIMENTAL-NOT-STOCK (order-certified step)
 #include "nest_impl.h"
 #include "numerics.h"
 #include "ring_buffer_impl.h"
@@ -243,6 +244,10 @@ nest::iaf_psc_exp::init_buffers_()
 void
 nest::iaf_psc_exp::pre_run_hook()
 {
+  // EXPERIMENTAL-NOT-STOCK (order-certified step)
+  order_certified_drive::register_hook();
+  order_certified_drive::mark_dirty( get_thread() );
+
   // ensures initialization in case mm connected after Simulate
   B_.logger_.init();
 
@@ -288,6 +293,26 @@ void
 nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
 {
   const double h = Time::get_resolution().get_ms();
+
+  // EXPERIMENTAL-NOT-STOCK (order-certified step): the drive of this slice, drawn by the prepass in the reference order. These are the additions
+  // handle( SpikeEvent& ) makes for the generator's events: slot get_modulo( lag + delay ), channel by the sign of
+  // weight x multiplicity, the product kept unfused. They go to slots of later slices only, as in stock.
+  if ( order_certified_index_ >= 0 )
+  {
+    const order_certified_drive::ThreadTable& tt = order_certified_drive::table( get_thread() );
+    const size_t i = static_cast< size_t >( order_certified_index_ );
+    for ( long lag = from; lag < to; ++lag )
+    {
+      const unsigned long n = tt.counts[ i * static_cast< size_t >( tt.slice_len ) + static_cast< size_t >( lag - from ) ];
+      if ( n > 0 )
+      {
+        const size_t multiplicity = n;
+        const double s = order_certified_drive::materialise( tt.weight[ i ] * multiplicity );
+        const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( lag + tt.delay[ i ] );
+        B_.input_buffer_.add_value( input_buffer_slot, s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN, s );
+      }
+    }
+  }
 
   // evolve from timestep 'from' to timestep 'to' with steps of h each
   for ( long lag = from; lag < to; ++lag )

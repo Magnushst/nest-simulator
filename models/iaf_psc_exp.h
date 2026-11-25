@@ -270,6 +270,20 @@ public:
   size_t send_test_event( Node&, size_t, synindex, bool ) override;
 
   void handle( SpikeEvent& ) override;
+
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step): the index of this neuron's drive in its thread's table, or -1 for the stock path.
+  void
+  set_order_certified_index( long i )
+  {
+    order_certified_index_ = i;
+  }
+
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step): true if update() draws nothing (no escape noise), as in stock when delta_ <= 1e-10.
+  bool
+  order_certified_deterministic() const
+  {
+    return not( P_.delta_ > 1e-10 );
+  }
   void handle( CurrentEvent& ) override;
   void handle( DataLoggingRequest& ) override;
 
@@ -462,6 +476,8 @@ private:
   State_ S_;
   Variables_ V_;
   Buffers_ B_;
+
+  long order_certified_index_ = -1;  //!< EXPERIMENTAL-NOT-STOCK (order-certified step)
   /** @} */
 
   //! Mapping of recordables names to access functions

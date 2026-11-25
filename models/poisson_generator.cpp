@@ -26,6 +26,7 @@
 #include "event_delivery_manager_impl.h"
 #include "exceptions.h"
 #include "kernel_manager.h"
+#include "order_certified_drive.h"  // EXPERIMENTAL-NOT-STOCK (order-certified step)
 #include "nest_impl.h"
 
 // Includes from libnestutil:
@@ -109,6 +110,10 @@ nest::poisson_generator::pre_run_hook()
   // rate_ is in spks/s, dt in ms, so we have to convert from s to ms
   poisson_distribution::param_type param( Time::get_resolution().get_ms() * P_.rate_ * 1e-3 );
   V_.poisson_dist_.param( param );
+
+  // EXPERIMENTAL-NOT-STOCK (order-certified step)
+  order_certified_drive::register_hook();
+  order_certified_drive::mark_dirty( get_thread() );
 }
 
 
@@ -119,6 +124,11 @@ nest::poisson_generator::pre_run_hook()
 void
 nest::poisson_generator::update( Time const& T, const long from, const long to )
 {
+  if ( order_certified_drive::handles_thread( get_thread() ) )
+  {
+    return;  // EXPERIMENTAL-NOT-STOCK (order-certified step): drawn by the update phase's prepass, applied by the targets
+  }
+
   if ( P_.rate_ <= 0 )
   {
     return;
@@ -133,6 +143,35 @@ nest::poisson_generator::update( Time const& T, const long from, const long to )
 
     DSSpikeEvent se;
     kernel().event_delivery_manager.send( *this, se, lag );
+  }
+}
+
+void
+nest::poisson_generator::order_certified_draw( size_t tid,
+  const Time& origin,
+  long from,
+  long to,
+  const std::vector< size_t >& targets,
+  std::vector< unsigned long >& counts,
+  long slice_len )
+{
+  // EXPERIMENTAL-NOT-STOCK (order-certified step): the same tests and the same draws as update() and event_hook(), in the same order.
+  if ( P_.rate_ <= 0 )
+  {
+    return;
+  }
+  for ( long lag = from; lag < to; ++lag )
+  {
+    if ( not StimulationDevice::is_active( origin + Time::step( lag ) ) )
+    {
+      continue;
+    }
+    for ( const size_t i : targets )
+    {
+      const long n_spikes = V_.poisson_dist_( get_vp_specific_rng( tid ) );
+      counts[ i * static_cast< size_t >( slice_len ) + static_cast< size_t >( lag - from ) ] =
+        n_spikes > 0 ? static_cast< unsigned long >( n_spikes ) : 0UL;
+    }
   }
 }
 

@@ -98,6 +98,13 @@ public:
   // functions are used. Since ConnectionBase depends on the template parameter,
   // they are not automatically found in the base class.
   using ConnectionBase::get_delay_steps;
+
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step): the weight that send() puts on the event.
+  double
+  get_weight_order_certified() const
+  {
+    return weight_;
+  }
   using ConnectionBase::get_rport;
   using ConnectionBase::get_target;
 

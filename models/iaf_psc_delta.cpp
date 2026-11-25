@@ -34,6 +34,7 @@
 // Includes from nestkernel:
 #include "exceptions.h"
 #include "kernel_manager.h"
+#include "order_certified_drive.h"  // EXPERIMENTAL-NOT-STOCK (order-certified step)
 #include "nest_impl.h"
 #include "universal_data_logger_impl.h"
 
@@ -233,6 +234,10 @@ nest::iaf_psc_delta::init_buffers_()
 void
 nest::iaf_psc_delta::pre_run_hook()
 {
+  // EXPERIMENTAL-NOT-STOCK (order-certified step)
+  order_certified_drive::register_hook();
+  order_certified_drive::mark_dirty( get_thread() );
+
   B_.logger_.init();
 
   const double h = Time::get_resolution().get_ms();
@@ -272,6 +277,23 @@ void
 nest::iaf_psc_delta::update( Time const& origin, const long from, const long to )
 {
   const double h = Time::get_resolution().get_ms();
+
+  // EXPERIMENTAL-NOT-STOCK (order-certified step): the drive of this slice, drawn by the prepass in the reference order. These are the additions
+  // handle( SpikeEvent& ) makes for the generator's events: relative step lag + delay, weight x multiplicity unfused.
+  if ( order_certified_index_ >= 0 )
+  {
+    const order_certified_drive::ThreadTable& tt = order_certified_drive::table( get_thread() );
+    const size_t i = static_cast< size_t >( order_certified_index_ );
+    for ( long lag = from; lag < to; ++lag )
+    {
+      const unsigned long n = tt.counts[ i * static_cast< size_t >( tt.slice_len ) + static_cast< size_t >( lag - from ) ];
+      if ( n > 0 )
+      {
+        const size_t multiplicity = n;
+        B_.spikes_.add_value( lag + tt.delay[ i ], order_certified_drive::materialise( tt.weight[ i ] * multiplicity ) );
+      }
+    }
+  }
   for ( long lag = from; lag < to; ++lag )
   {
     if ( S_.r_ == 0 )

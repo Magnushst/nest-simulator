@@ -49,6 +49,14 @@ class ConnectorModel;
  */
 class TargetTableDevices
 {
+public:
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step): read-only access to the connectors of device ldid on thread tid, by synapse type.
+  const std::vector< ConnectorBase* >&
+  get_connectors_from_device_order_certified( const size_t tid, const size_t ldid ) const
+  {
+    return target_from_devices_[ tid ][ ldid ];
+  }
+
 private:
   //! 3d structure storing connections from neurons to devices
   std::vector< std::vector< std::vector< ConnectorBase* > > > target_to_devices_;

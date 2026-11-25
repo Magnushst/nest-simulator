@@ -321,6 +321,13 @@ public:
    */
   void send_from_device( const size_t tid, const size_t ldid, Event& e );
 
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step): read-only access to the connectors of device ldid on thread tid.
+  const std::vector< ConnectorBase* >&
+  get_connectors_from_device_order_certified( const size_t tid, const size_t ldid ) const
+  {
+    return target_table_devices_.get_connectors_from_device_order_certified( tid, ldid );
+  }
+
   /**
    * Send event e to all targets of node source on thread t
    */

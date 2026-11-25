@@ -229,6 +229,13 @@ public:
   {
   }
 
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step): read-only access, used to build the drive table of the update phase.
+  const BlockVector< ConnectionT >&
+  get_connections_order_certified() const
+  {
+    return C_;
+  }
+
   ~Connector() override
   {
     C_.clear();

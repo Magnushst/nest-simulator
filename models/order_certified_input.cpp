@@ -49,8 +49,9 @@ bool
 reporting()
 {
   static const bool report = [] {
+    // on by default, so a pipeline run, which cannot set this variable, still shows where U1 and U2 ran
     const char* v = std::getenv( "NEST_ORDER_CERTIFIED_REPORT" );
-    return v != nullptr and v[ 0 ] == '1';
+    return not( v != nullptr and v[ 0 ] == '0' );
   }();
   return report;
 }

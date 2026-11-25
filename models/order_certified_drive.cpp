@@ -53,13 +53,14 @@ switched_off()
   return off;
 }
 
-//! NEST_ORDER_CERTIFIED_REPORT=1 prints one line per thread and build, so a run shows where U1 ran; read once.
+//! One line per thread and build on stderr, so a run shows where U1 ran; NEST_ORDER_CERTIFIED_REPORT=0 silences it.
 bool
 reporting()
 {
   static const bool report = [] {
+    // on by default, so a pipeline run, which cannot set this variable, still shows where U1 and U2 ran
     const char* v = std::getenv( "NEST_ORDER_CERTIFIED_REPORT" );
-    return v != nullptr and v[ 0 ] == '1';
+    return not( v != nullptr and v[ 0 ] == '0' );
   }();
   return report;
 }

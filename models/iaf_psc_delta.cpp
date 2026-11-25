@@ -337,8 +337,22 @@ nest::iaf_psc_delta::handle( SpikeEvent& e )
   //     explicity, since it depends on delay and offset within
   //     the update cycle.  The way it is done here works, but
   //     is clumsy and should be improved.
-  B_.spikes_.add_value(
-    e.get_rel_delivery_steps( kernel().simulation_manager.get_slice_origin() ), e.get_weight() * e.get_multiplicity() );
+  const long rel = e.get_rel_delivery_steps( kernel().simulation_manager.get_slice_origin() );
+  // EXPERIMENTAL, NOT STOCK: in the plain asynchronous exchange a device's input waits for the earlier spikes
+  if ( kernel().event_delivery_manager.deferring_device_input( get_thread() ) )
+  {
+    kernel().event_delivery_manager.defer_device_input(
+      get_thread(), this, rel, 0, e.get_weight() * e.get_multiplicity() );
+    return;
+  }
+  B_.spikes_.add_value( rel, e.get_weight() * e.get_multiplicity() );
+}
+
+void
+nest::iaf_psc_delta::apply_deferred_input( const long rel, const int, const double value )
+{
+  // EXPERIMENTAL, NOT STOCK: the same addition as handle( SpikeEvent& ), one slice later
+  B_.spikes_.add_value( rel, value );
 }
 
 void

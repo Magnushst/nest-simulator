@@ -153,6 +153,43 @@ public:
   //! EXPERIMENTAL: the lockstep arm's exchange of this slice's spikes, completed before it returns. Master only.
   void lockstep_p2p_exchange( const long stamp );
 
+  //! EXPERIMENTAL: whether the plain asynchronous exchange is on (NEST_ASYNC=async_plain).
+  bool
+  plain_async() const
+  {
+    return plain_async_;
+  }
+
+  //! EXPERIMENTAL: the steps by which the stamps of held spikes are shifted at delivery (plain: minus the slice).
+  void
+  set_delivery_offset( const long offset )
+  {
+    fused_deliver_offset_ = offset;
+  }
+
+  //! EXPERIMENTAL: size the per-thread stores of the plain exchange; outside parallel regions only.
+  void prepare_plain_async( const size_t num_threads );
+
+  //! EXPERIMENTAL: whether a device's input to a neuron on thread tid is kept for the next slice.
+  bool
+  deferring_device_input( const size_t tid ) const
+  {
+    return plain_async_ and not plain_break_no_defer_ and deferring_[ tid ] != 0;
+  }
+
+  //! EXPERIMENTAL: thread tid starts or ends its update phase (the plain exchange keeps device inputs in it).
+  void
+  set_deferring( const size_t tid, const bool on )
+  {
+    deferring_[ tid ] = on ? 1 : 0;
+  }
+
+  //! EXPERIMENTAL: keep a device's input, rel steps after the current slice origin, for the next slice.
+  void defer_device_input( const size_t tid, Node* target, const long rel, const int channel, const double value );
+
+  //! EXPERIMENTAL: add the inputs thread tid kept, in the order they came.
+  void apply_deferred_inputs( const size_t tid );
+
   //! EXPERIMENTAL: the master's cumulative exchange times (s) and what it posted, for the cycle log.
   void
   get_exchange_totals( double& post, double& wait, double& receive, double& complete, size_t& messages,
@@ -410,7 +447,8 @@ private:
   template < typename SpikeDataT >
   void deliver_events_( const size_t tid,
     const std::vector< SpikeDataT >& recv_buffer,
-    const size_t chunk_size_override = 0 );
+    const size_t chunk_size_override = 0,
+    const long stamp_offset = 0 );
 
   /**
    * Deletes all spikes from spike registers and resets spike
@@ -544,6 +582,20 @@ private:
   std::vector< SpikeData > fused_deliver_buffer_;
   size_t fused_deliver_chunk_ = 0;
   bool fused_deliver_ready_ = false;
+  //! EXPERIMENTAL: the steps by which held spikes' stamps are shifted at delivery
+  long fused_deliver_offset_ = 0;
+  //! EXPERIMENTAL: the plain asynchronous exchange, its negative control, and its kept device inputs
+  bool plain_async_ = false;
+  bool plain_break_no_defer_ = false;
+  std::vector< char > deferring_;
+  struct DeferredInput
+  {
+    Node* target;
+    long abs_step;
+    int channel;
+    double value;
+  };
+  std::vector< std::vector< DeferredInput > > deferred_inputs_;
 
   // EXPERIMENTAL, NOT STOCK: the asynchronous exchange
   bool async_ = false;

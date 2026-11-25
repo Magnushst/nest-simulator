@@ -102,10 +102,19 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
 
     // EXPERIMENTAL, NOT STOCK: the fused sweep (and later the asynchronous exchange), switched on per run
     const char* mode = std::getenv( "NEST_ASYNC" );
-    fused_ = mode != nullptr and ( std::string( mode ) == "fused" or std::string( mode ) == "async" );
-    async_ = mode != nullptr and std::string( mode ) == "async";
+    plain_async_ = mode != nullptr and std::string( mode ) == "async_plain";
+    fused_ = mode != nullptr and ( std::string( mode ) == "fused" or std::string( mode ) == "async" or plain_async_ );
+    async_ = mode != nullptr and ( std::string( mode ) == "async" or plain_async_ );
     const char* broken = std::getenv( "NEST_ASYNC_BREAK" );
     async_break_reverse_ = async_ and broken != nullptr and std::string( broken ) == "reverse_ranks";
+    plain_break_no_defer_ = plain_async_ and broken != nullptr and std::string( broken ) == "no_defer";
+    fused_deliver_offset_ = 0;
+    deferred_inputs_.clear();
+    deferring_.clear();
+    if ( plain_break_no_defer_ )
+    {
+      std::cerr << "EXPERIMENTAL NOT STOCK: negative control: device inputs not kept" << std::endl;
+    }
     const char* jitter = std::getenv( "NEST_ASYNC_JITTER_US" );
     async_jitter_us_ = ( async_ and jitter != nullptr ) ? std::max( 0L, std::atol( jitter ) ) : 0;
     async_stats_ = async_ and std::getenv( "NEST_ASYNC_STATS" ) != nullptr;
@@ -665,7 +674,7 @@ EventDeliveryManager::deliver_events( const size_t tid )
     // EXPERIMENTAL, NOT STOCK: the spikes held for this slice, delivered as stock delivers them
     if ( fused_deliver_ready_ )
     {
-      deliver_events_( tid, fused_deliver_buffer_, fused_deliver_chunk_ );
+      deliver_events_( tid, fused_deliver_buffer_, fused_deliver_chunk_, fused_deliver_offset_ );
     }
   }
   else if ( off_grid_spiking_ )
@@ -683,7 +692,8 @@ template < typename SpikeDataT >
 void
 EventDeliveryManager::deliver_events_( const size_t tid,
   const std::vector< SpikeDataT >& recv_buffer,
-  const size_t chunk_size_override )
+  const size_t chunk_size_override,
+  const long stamp_offset )
 {
   // deliver only at beginning of time slice
   if ( kernel().simulation_manager.get_from_step() > 0 )
@@ -703,8 +713,8 @@ EventDeliveryManager::deliver_events_( const size_t tid,
   for ( size_t lag = 0; lag < static_cast< size_t >( kernel().connection_manager.get_min_delay() ); ++lag )
   {
     // Subtract min_delay because spikes were emitted in previous time slice and we use current clock.
-    prepared_timestamps[ lag ] =
-      kernel().simulation_manager.get_clock() + Time::step( lag + 1 - kernel().connection_manager.get_min_delay() );
+    prepared_timestamps[ lag ] = kernel().simulation_manager.get_clock()
+      + Time::step( lag + 1 - kernel().connection_manager.get_min_delay() + stamp_offset );  // EXPERIMENTAL offset
   }
 
   // Deliver spikes sent by each rank in order
@@ -1225,7 +1235,7 @@ EventDeliveryManager::prepare_fused_delivery( const long stamp )
     {
       async_receive_( stamp );
     }
-    async_complete_sends_( stamp - 2 );
+    async_complete_sends_( stamp - 2 * kernel().connection_manager.get_min_delay() );
     return;
   }
   const auto found = fused_held_.find( stamp );
@@ -1277,6 +1287,42 @@ async_mix( std::uint64_t x )
 }
 } // namespace
 #endif
+
+void
+EventDeliveryManager::prepare_plain_async( const size_t num_threads )
+{
+  if ( deferring_.size() != num_threads )
+  {
+    deferring_.assign( num_threads, 0 );
+    deferred_inputs_.resize( num_threads );
+  }
+}
+
+void
+EventDeliveryManager::defer_device_input( const size_t tid,
+  Node* target,
+  const long rel,
+  const int channel,
+  const double value )
+{
+  deferred_inputs_[ tid ].push_back(
+    DeferredInput { target, kernel().simulation_manager.get_slice_origin().get_steps() + rel, channel, value } );
+}
+
+void
+EventDeliveryManager::apply_deferred_inputs( const size_t tid )
+{
+  if ( deferred_inputs_.size() <= tid )
+  {
+    return;
+  }
+  const long origin = kernel().simulation_manager.get_slice_origin().get_steps();
+  for ( const DeferredInput& in : deferred_inputs_[ tid ] )
+  {
+    in.target->apply_deferred_input( in.abs_step - origin, in.channel, in.value );
+  }
+  deferred_inputs_[ tid ].clear();
+}
 
 void
 EventDeliveryManager::lockstep_p2p_exchange( const long stamp )

@@ -214,6 +214,8 @@ private:
   // EXPERIMENTAL, NOT STOCK: the fused half-step sweep (NEST_ASYNC set to fused or async)
   bool fused_ = false;         //!< the fused sweep is on
   bool fused_decided_ = false; //!< the decision half of the current step has already run
+  bool plain_ = false;         //!< the plain asynchronous exchange (NEST_ASYNC=async_plain)
+  void check_plain_support_() const; //!< throws unless the network is one the plain exchange supports
   int fused_break_ = 0;        //!< negative control (NEST_ASYNC_BREAK=decision_first): the halves swapped
   void check_fused_support_() const; //!< throws unless the network is one the fused sweep supports
 

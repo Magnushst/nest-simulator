@@ -294,6 +294,7 @@ private:
   }
   void update_decision( const Time&, const long, const Time& ) override;
   void update_input( const Time&, const long ) override;
+  void apply_deferred_input( const long, const int, const double ) override;
 
   // intensity function
   double phi_() const;

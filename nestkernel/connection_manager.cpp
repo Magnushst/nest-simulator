@@ -23,6 +23,8 @@
 #include "connection_manager.h"
 
 // C++ includes:
+#include <iostream>
+#include <cstdlib>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -524,6 +526,23 @@ nest::ConnectionManager::update_delay_extrema_()
   if ( min_delay_ == Time::pos_inf().get_steps() )
   {
     min_delay_ = Time::get_resolution().get_steps();
+  }
+
+  // EXPERIMENTAL, NOT STOCK: the communication interval. NEST's slice becomes NEST_ASYNC_INTERVAL steps, at most
+  // the minimum delay; the minimum delay itself is kept for the support checks.
+  async_true_min_delay_ = min_delay_;
+  const char* interval = std::getenv( "NEST_ASYNC_INTERVAL" );
+  if ( interval != nullptr )
+  {
+    const long steps = std::atol( interval );
+    if ( get_user_set_delay_extrema() or steps < 1 or steps > min_delay_ )
+    {
+      throw KernelException( "EXPERIMENTAL NEST_ASYNC_INTERVAL: between 1 and the minimum delay in steps, "
+                             "and the minimum delay not set by the user" );
+    }
+    min_delay_ = steps;
+    std::cerr << "EXPERIMENTAL NOT STOCK: communication interval " << steps << " steps (minimum delay "
+              << async_true_min_delay_ << " steps)" << std::endl;
   }
 }
 

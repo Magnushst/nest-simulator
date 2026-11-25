@@ -300,6 +300,13 @@ public:
 
   bool get_user_set_delay_extrema() const;
 
+  //! EXPERIMENTAL, NOT STOCK: the network's minimum delay in steps, before NEST_ASYNC_INTERVAL shortened the slice
+  long
+  get_async_true_min_delay() const
+  {
+    return async_true_min_delay_;
+  }
+
   /**
    * Send event e to the targets of one source on thread tid, starting at connection lcid.
    * Returns the number of connections visited (Connector::send), which the cycle timers count.
@@ -680,6 +687,7 @@ private:
   long min_delay_;  //!< Value of the smallest delay in the network.
 
   long max_delay_;  //!< Value of the largest delay in the network in steps.
+  long async_true_min_delay_ = 0;  //!< EXPERIMENTAL, NOT STOCK: the minimum delay before the interval
 
   //! Whether to keep source table after connection setup is complete.
   bool keep_source_table_;

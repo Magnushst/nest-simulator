@@ -236,6 +236,14 @@ private:
 
   void update( Time const&, const long, const long ) override;
 
+  // EXPERIMENTAL, NOT STOCK: the plain asynchronous exchange only (its input acts in the same step)
+  int
+  fused_kind() const override
+  {
+    return 3;
+  }
+  void apply_deferred_input( const long, const int, const double ) override;
+
   // The next two classes need to be friends to access the State_ class/member
   friend class RecordablesMap< iaf_psc_delta >;
   friend class UniversalDataLogger< iaf_psc_delta >;

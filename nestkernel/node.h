@@ -300,7 +300,8 @@ public:
   /**
    * EXPERIMENTAL, NOT STOCK: the fused half-step sweep (sp4-direction-scoping/async_2026-11-24/THEORY.md, Variant
    * 2.3'). 0: not supported; 1: a neuron whose update splits into a decision half and an input half; 2: a device whose
-   * whole update runs at its place in the input half.
+   * whole update runs at its place in the input half; 3: a neuron for the plain asynchronous exchange only (stock's
+   * update order).
    */
   virtual int
   fused_kind() const
@@ -313,6 +314,13 @@ public:
   update_decision( Time const&, const long, Time const& )
   {
     throw std::logic_error( "EXPERIMENTAL fused sweep: update_decision not implemented for this node" );
+  }
+
+  //! EXPERIMENTAL: add a device input kept by the plain asynchronous exchange, rel steps after the slice origin.
+  virtual void
+  apply_deferred_input( const long, const int, const double )
+  {
+    throw std::logic_error( "EXPERIMENTAL plain asynchronous exchange: apply_deferred_input not implemented" );
   }
 
   //! EXPERIMENTAL: the input half of the update from origin + lag.

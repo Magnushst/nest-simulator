@@ -412,13 +412,28 @@ nest::iaf_psc_exp::handle( SpikeEvent& e )
 {
   assert( e.get_delay_steps() > 0 );
 
-  const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo(
-    e.get_rel_delivery_steps( kernel().simulation_manager.get_slice_origin() ) );
+  const long rel = e.get_rel_delivery_steps( kernel().simulation_manager.get_slice_origin() );
+  const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( rel );
 
   const double s = e.get_weight() * e.get_multiplicity();
 
+  // EXPERIMENTAL, NOT STOCK: in the plain asynchronous exchange a device's input waits for the earlier spikes
+  if ( kernel().event_delivery_manager.deferring_device_input( get_thread() ) )
+  {
+    kernel().event_delivery_manager.defer_device_input(
+      get_thread(), this, rel, s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN, s );
+    return;
+  }
+
   // separate buffer channels for excitatory and inhibitory inputs
   B_.input_buffer_.add_value( input_buffer_slot, s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN, s );
+}
+
+void
+nest::iaf_psc_exp::apply_deferred_input( const long rel, const int channel, const double value )
+{
+  // EXPERIMENTAL, NOT STOCK: the same addition as handle( SpikeEvent& ), one slice later
+  B_.input_buffer_.add_value( kernel().event_delivery_manager.get_modulo( rel ), channel, value );
 }
 
 void

@@ -107,6 +107,11 @@ nest::SimulationManager::initialize( const bool adjust_number_of_threads_or_rng_
   const char* fused_broken = std::getenv( "NEST_ASYNC_BREAK" );
   fused_break_ = ( fused_ and fused_broken != nullptr and std::string( fused_broken ) == "decision_first" ) ? 1 : 0;
   fused_decided_ = false;
+  plain_ = fused_mode != nullptr and std::string( fused_mode ) == "async_plain";
+  if ( plain_ )
+  {
+    std::cerr << "EXPERIMENTAL NOT STOCK: plain asynchronous exchange is on" << std::endl;
+  }
   if ( fused_ )
   {
     std::cerr << "EXPERIMENTAL NOT STOCK: fused half-step sweep is on"
@@ -872,7 +877,7 @@ nest::SimulationManager::check_fused_support_() const
     const SparseNodeArray& nodes = kernel().node_manager.get_local_nodes( t );
     for ( SparseNodeArray::const_iterator n = nodes.begin(); n != nodes.end(); ++n )
     {
-      if ( n->get_node()->fused_kind() == 0 )
+      if ( n->get_node()->fused_kind() != 1 and n->get_node()->fused_kind() != 2 )
       {
         failure = "EXPERIMENTAL fused sweep: node model " + n->get_node()->get_name() + " is not supported";
         break;
@@ -883,6 +888,48 @@ nest::SimulationManager::check_fused_support_() const
   {
     throw KernelException(
       failure.empty() ? "EXPERIMENTAL fused sweep: another rank holds something the sweep does not support" : failure );
+  }
+}
+
+void
+nest::SimulationManager::check_plain_support_() const
+{
+  // EXPERIMENTAL, NOT STOCK: what the plain asynchronous exchange supports. Collective, as the fused check.
+  const long L = kernel().connection_manager.get_min_delay();
+  const long D = kernel().connection_manager.get_async_true_min_delay();
+  std::string failure;
+  if ( 2 * L > D )
+  {
+    failure = "EXPERIMENTAL plain exchange: needs twice the interval at most the minimum delay (interval "
+      + std::to_string( L ) + ", minimum delay " + std::to_string( D ) + " steps)";
+  }
+  else if ( to_do_ % L != 0 or from_step_ != 0 )
+  {
+    failure = "EXPERIMENTAL plain exchange: every Simulate call a whole number of intervals";
+  }
+  else if ( kernel().connection_manager.secondary_connections_exist() or kernel().node_manager.wfr_is_used()
+    or kernel().sp_manager.is_structural_plasticity_enabled()
+    or kernel().event_delivery_manager.get_off_grid_communication() )
+  {
+    failure = "EXPERIMENTAL plain exchange: secondary events, waveform relaxation, structural plasticity and "
+              "off-grid spikes are not supported";
+  }
+  for ( size_t t = 0; failure.empty() and t < kernel().vp_manager.get_num_threads(); ++t )
+  {
+    const SparseNodeArray& nodes = kernel().node_manager.get_local_nodes( t );
+    for ( SparseNodeArray::const_iterator n = nodes.begin(); n != nodes.end(); ++n )
+    {
+      if ( n->get_node()->fused_kind() == 0 )
+      {
+        failure = "EXPERIMENTAL plain exchange: node model " + n->get_node()->get_name() + " is not supported";
+        break;
+      }
+    }
+  }
+  if ( kernel().mpi_manager.any_true( not failure.empty() ) )
+  {
+    throw KernelException(
+      failure.empty() ? "EXPERIMENTAL plain exchange: another rank holds something it does not support" : failure );
   }
 }
 
@@ -955,6 +1002,17 @@ nest::SimulationManager::update_()
   {
     check_fused_support_();  // EXPERIMENTAL, NOT STOCK
   }
+  if ( plain_ )
+  {
+    // EXPERIMENTAL, NOT STOCK: held spikes arrive one slice late, so their stamps move back one slice
+    check_plain_support_();
+    kernel().event_delivery_manager.prepare_plain_async( kernel().vp_manager.get_num_threads() );
+    kernel().event_delivery_manager.set_delivery_offset( -kernel().connection_manager.get_min_delay() );
+  }
+  else
+  {
+    kernel().event_delivery_manager.set_delivery_offset( 0 );
+  }
   if ( kernel().event_delivery_manager.lockstep_p2p()
     and kernel().mpi_manager.any_true( kernel().event_delivery_manager.get_off_grid_communication() ) )
   {
@@ -999,6 +1057,18 @@ nest::SimulationManager::update_()
               kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 1 );
             }
           }
+          // EXPERIMENTAL, NOT STOCK: the call's first slice delivers what was held for it
+          kernel().event_delivery_manager.prepare_fused_delivery( clock_.get_steps() );
+          fused_decided_ = true;
+        }
+#pragma omp barrier
+      }
+      if ( plain_ and not fused_decided_ )
+      {
+#pragma omp master
+        {
+          // EXPERIMENTAL, NOT STOCK: the plain exchange's opening block: the call's first slice's spikes
+          kernel().event_delivery_manager.prepare_fused_delivery( clock_.get_steps() );
           fused_decided_ = true;
         }
 #pragma omp barrier
@@ -1006,16 +1076,6 @@ nest::SimulationManager::update_()
 
       do
       {
-        if ( fused_ and from_step_ == 0 )
-        {
-          // EXPERIMENTAL, NOT STOCK: this slice delivers the spikes held for its time
-#pragma omp master
-          {
-            kernel().event_delivery_manager.prepare_fused_delivery( clock_.get_steps() );
-          }
-#pragma omp barrier
-        }
-
         if ( print_time_ )
         {
           gettimeofday( &t_slice_begin_, nullptr );
@@ -1023,7 +1083,7 @@ nest::SimulationManager::update_()
 
         // Do not deliver events at beginning of first slice, nothing can be there yet
         // and invalid markers have not been properly set in send buffers.
-        if ( ( slice_ > 0 or fused_ ) and from_step_ == 0 )
+        if ( ( slice_ > 0 or fused_ or plain_ ) and from_step_ == 0 )
         {
           // Deliver secondary events before primary events
           //
@@ -1245,6 +1305,12 @@ nest::SimulationManager::update_()
         }
         else
         {
+          if ( plain_ )
+          {
+            // EXPERIMENTAL, NOT STOCK: the devices' inputs of the last slice, after the spikes delivered above
+            kernel().event_delivery_manager.apply_deferred_inputs( tid );
+            kernel().event_delivery_manager.set_deferring( tid, true );
+          }
           for ( SparseNodeArray::const_iterator n = thread_local_nodes.begin(); n != thread_local_nodes.end(); ++n )
           {
             Node* node = n->get_node();
@@ -1252,6 +1318,10 @@ nest::SimulationManager::update_()
             {
               ( node )->update( clock_, from_step_, to_step_ );
             }
+          }
+          if ( plain_ )
+          {
+            kernel().event_delivery_manager.set_deferring( tid, false );
           }
         }
 
@@ -1288,16 +1358,23 @@ nest::SimulationManager::update_()
               sw_gather_spike_data_.start();
               if ( kernel().event_delivery_manager.async_exchange() )
               {
-                // EXPERIMENTAL, NOT STOCK: post the spikes just decided, unless this slice decided none
-                if ( to_do_ > to_step_ - from_step_ )
+                if ( plain_ )
                 {
+                  // EXPERIMENTAL, NOT STOCK: every slice's spikes, delivered two slices later
+                  kernel().event_delivery_manager.async_send(
+                    clock_.get_steps() + 2 * kernel().connection_manager.get_min_delay() );
+                }
+                else if ( to_do_ > to_step_ - from_step_ )
+                {
+                  // EXPERIMENTAL, NOT STOCK: post the spikes just decided, unless this slice decided none
                   kernel().event_delivery_manager.async_send( clock_.get_steps() + 2 );
                 }
               }
               else if ( kernel().event_delivery_manager.lockstep_p2p() )
               {
                 // EXPERIMENTAL, NOT STOCK: the lockstep arm, the same messages completed inside the slice
-                kernel().event_delivery_manager.lockstep_p2p_exchange( clock_.get_steps() + 1 );
+                kernel().event_delivery_manager.lockstep_p2p_exchange(
+                  clock_.get_steps() + kernel().connection_manager.get_min_delay() );
               }
               else
               {
@@ -1307,6 +1384,12 @@ nest::SimulationManager::update_()
                   // EXPERIMENTAL, NOT STOCK: the spikes just decided are stamped two steps ahead
                   kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 2 );
                 }
+              }
+              if ( ( fused_ or plain_ ) and to_do_ > to_step_ - from_step_ )
+              {
+                // EXPERIMENTAL, NOT STOCK: receive the next slice's spikes here, which saves a barrier
+                kernel().event_delivery_manager.prepare_fused_delivery(
+                  clock_.get_steps() + kernel().connection_manager.get_min_delay() );
               }
               sw_gather_spike_data_.stop();
 #ifdef CYCLE_TIMERS
@@ -1458,9 +1541,9 @@ nest::SimulationManager::update_()
 
       } while ( to_do_ > 0 );
 
-      if ( fused_ )
+      if ( fused_ or plain_ )
       {
-        // EXPERIMENTAL, NOT STOCK: the call's last slice ran no decision half
+        // EXPERIMENTAL, NOT STOCK: the call's last slice ran no decision half, and received nothing
 #pragma omp barrier
 #pragma omp master
         {

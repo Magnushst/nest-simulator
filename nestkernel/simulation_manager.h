@@ -50,6 +50,10 @@ namespace nest
  */
 using OrderCertifiedPrepass = void ( * )( size_t tid, const Time& origin, long from, long to );
 extern std::atomic< OrderCertifiedPrepass > order_certified_update_prepass;
+
+//! EXPERIMENTAL-NOT-STOCK (order-certified step): called once at the end of every run, outside the threads' parallel region.
+using OrderCertifiedPostRun = void ( * )();
+extern std::atomic< OrderCertifiedPostRun > order_certified_post_run;
 class Node;
 
 class SimulationManager : public ManagerInterface

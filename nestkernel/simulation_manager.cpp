@@ -45,6 +45,7 @@
 
 // EXPERIMENTAL-NOT-STOCK (order-certified step): see simulation_manager.h.
 std::atomic< nest::OrderCertifiedPrepass > nest::order_certified_update_prepass { nullptr };
+std::atomic< nest::OrderCertifiedPostRun > nest::order_certified_post_run { nullptr };
 
 nest::SimulationManager::SimulationManager()
   : clock_( Time::tic( 0L ) )
@@ -668,6 +669,12 @@ nest::SimulationManager::run( Time const& t )
   }
 
   call_update_();
+
+  // EXPERIMENTAL-NOT-STOCK (order-certified step): write the run's tables back into stock's structures
+  if ( const OrderCertifiedPostRun post_run = order_certified_post_run.load( std::memory_order_acquire ) )
+  {
+    post_run();
+  }
 
   kernel().io_manager.post_run_hook();
   kernel().random_manager.check_rng_synchrony();

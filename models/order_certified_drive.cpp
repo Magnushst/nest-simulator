@@ -5,6 +5,7 @@
  */
 
 #include "order_certified_drive.h"
+#include "order_certified_input.h"
 
 // C++ includes:
 #include <cstdlib>
@@ -218,7 +219,8 @@ build( size_t tid, ThreadTable& tt )
 void
 prepass_hook( size_t tid, const Time& origin, long from, long to )
 {
-  prepass( tid, origin, from, to );
+  order_certified_input::prepass( tid );  // U2: build the run's input table at its first slice
+  prepass( tid, origin, from, to );         // U1: the drive of this slice
 }
 
 }  // namespace

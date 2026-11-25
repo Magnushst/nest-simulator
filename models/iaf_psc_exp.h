@@ -278,6 +278,30 @@ public:
     order_certified_index_ = i;
   }
 
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step), U2: this neuron's index in its thread's input table, or -1 for its own buffer.
+  void
+  set_order_certified_input_index( long i )
+  {
+    order_certified_input_index_ = i;
+  }
+
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the slots of this neuron's own buffer, read and written by the table's build and write-back.
+  size_t
+  order_certified_input_slots() const
+  {
+    return B_.input_buffer_.size();
+  }
+  const std::array< double, 4 >&
+  order_certified_input_get( size_t slot ) const
+  {
+    return B_.input_buffer_.get_values_all_channels( slot );
+  }
+  void
+  order_certified_input_set( size_t slot, const std::array< double, 4 >& values )
+  {
+    B_.input_buffer_.set_values_all_channels_order_certified( slot, values );
+  }
+
   //! EXPERIMENTAL-NOT-STOCK (order-certified step): true if update() draws nothing (no escape noise), as in stock when delta_ <= 1e-10.
   bool
   order_certified_deterministic() const
@@ -408,6 +432,7 @@ private:
 
     /** buffers and sums up incoming spikes/currents */
     MultiChannelInputBuffer< NUM_INPUT_CHANNELS > input_buffer_;
+    static_assert( NUM_INPUT_CHANNELS == 4, "U2's table holds 4 channels per slot" );  // EXPERIMENTAL-NOT-STOCK (order-certified step)
 
     //! Logger for all analog data
     UniversalDataLogger< iaf_psc_exp > logger_;
@@ -477,7 +502,8 @@ private:
   Variables_ V_;
   Buffers_ B_;
 
-  long order_certified_index_ = -1;  //!< EXPERIMENTAL-NOT-STOCK (order-certified step)
+  long order_certified_index_ = -1;        //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U1
+  long order_certified_input_index_ = -1;  //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U2
   /** @} */
 
   //! Mapping of recordables names to access functions

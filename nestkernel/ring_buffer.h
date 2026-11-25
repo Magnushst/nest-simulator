@@ -374,6 +374,13 @@ public:
   void add_value( const size_t slot, const size_t channel, const double value );
 
   const std::array< double, num_channels >& get_values_all_channels( const size_t slot ) const;
+
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step): set one slot's values (the write-back of U2's table).
+  void
+  set_values_all_channels_order_certified( const size_t slot, const std::array< double, num_channels >& values )
+  {
+    buffer_[ slot ] = values;
+  }
   void reset_values_all_channels( const size_t slot );
 
   void clear();

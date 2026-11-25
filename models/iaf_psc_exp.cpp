@@ -33,6 +33,7 @@
 #include "iaf_propagator.h"
 #include "kernel_manager.h"
 #include "order_certified_drive.h"  // EXPERIMENTAL-NOT-STOCK (order-certified step)
+#include "order_certified_input.h"  // EXPERIMENTAL-NOT-STOCK (order-certified step)
 #include "nest_impl.h"
 #include "numerics.h"
 #include "ring_buffer_impl.h"
@@ -247,6 +248,7 @@ nest::iaf_psc_exp::pre_run_hook()
   // EXPERIMENTAL-NOT-STOCK (order-certified step)
   order_certified_drive::register_hook();
   order_certified_drive::mark_dirty( get_thread() );
+  order_certified_input::register_hooks();
 
   // ensures initialization in case mm connected after Simulate
   B_.logger_.init();
@@ -309,7 +311,16 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
         const size_t multiplicity = n;
         const double s = order_certified_drive::materialise( tt.weight[ i ] * multiplicity );
         const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( lag + tt.delay[ i ] );
-        B_.input_buffer_.add_value( input_buffer_slot, s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN, s );
+        if ( order_certified_input_index_ >= 0 )  // U2
+        {
+          order_certified_input::slot( order_certified_input::table( get_thread() ),
+            input_buffer_slot,
+            static_cast< size_t >( order_certified_input_index_ ) )[ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
+        }
+        else
+        {
+          B_.input_buffer_.add_value( input_buffer_slot, s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN, s );
+        }
       }
     }
   }
@@ -337,7 +348,12 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
 
     // get read access to the correct input-buffer slot
     const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( lag );
-    auto& input = B_.input_buffer_.get_values_all_channels( input_buffer_slot );
+    // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same slot, from the thread's table when it holds this neuron's input
+    auto& input = order_certified_input_index_ >= 0
+      ? order_certified_input::slot( order_certified_input::table( get_thread() ),
+        input_buffer_slot,
+        static_cast< size_t >( order_certified_input_index_ ) )
+      : B_.input_buffer_.get_values_all_channels( input_buffer_slot );
 
     // the spikes arriving at T+1 have an immediate effect on the state of the
     // neuron
@@ -365,7 +381,17 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
     S_.i_1_ = input[ Buffers_::I1 ];
 
     // reset all values in the currently processed input-buffer slot
-    B_.input_buffer_.reset_values_all_channels( input_buffer_slot );
+    if ( order_certified_input_index_ >= 0 )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2
+    {
+      order_certified_input::slot( order_certified_input::table( get_thread() ),
+        input_buffer_slot,
+        static_cast< size_t >( order_certified_input_index_ ) )
+        .fill( 0.0 );
+    }
+    else
+    {
+      B_.input_buffer_.reset_values_all_channels( input_buffer_slot );
+    }
 
     // log state data
     B_.logger_.record_data( origin.get_steps() + lag );
@@ -383,13 +409,27 @@ nest::iaf_psc_exp::handle( SpikeEvent& e )
   const double s = e.get_weight() * e.get_multiplicity();
 
   // separate buffer channels for excitatory and inhibitory inputs
-  B_.input_buffer_.add_value( input_buffer_slot, s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN, s );
+  if ( order_certified_input_index_ >= 0 )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same addition, in the thread's table
+  {
+    order_certified_input::slot( order_certified_input::table( get_thread() ),
+      input_buffer_slot,
+      static_cast< size_t >( order_certified_input_index_ ) )[ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
+  }
+  else
+  {
+    B_.input_buffer_.add_value( input_buffer_slot, s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN, s );
+  }
 }
 
 void
 nest::iaf_psc_exp::handle( CurrentEvent& e )
 {
   assert( e.get_delay_steps() > 0 );
+  if ( order_certified_input_index_ >= 0 )
+  {
+    throw KernelException( "EXPERIMENTAL-NOT-STOCK order-certified U2: a CurrentEvent reached a neuron whose input is "
+                           "held in its thread's table" );
+  }
 
   const double c = e.get_current();
   const double w = e.get_weight();

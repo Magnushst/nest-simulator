@@ -523,6 +523,9 @@ nest::ConnectionManager::update_delay_extrema_()
     max_delay_ = *std::max_element( max_delays.begin(), max_delays.end() );
   }
 
+  // EXPERIMENTAL, NOT STOCK: whether any delay exists yet; the interval applies only then
+  const bool async_have_delays = min_delay_ != Time::pos_inf().get_steps();
+
   if ( min_delay_ == Time::pos_inf().get_steps() )
   {
     min_delay_ = Time::get_resolution().get_steps();
@@ -532,7 +535,7 @@ nest::ConnectionManager::update_delay_extrema_()
   // the minimum delay; the minimum delay itself is kept for the support checks.
   async_true_min_delay_ = min_delay_;
   const char* interval = std::getenv( "NEST_ASYNC_INTERVAL" );
-  if ( interval != nullptr )
+  if ( interval != nullptr and async_have_delays )
   {
     const long steps = std::atol( interval );
     if ( get_user_set_delay_extrema() or steps < 1 or steps > min_delay_ )

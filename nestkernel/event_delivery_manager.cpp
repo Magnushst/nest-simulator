@@ -25,6 +25,8 @@
 // C++ includes:
 #include <algorithm>  // rotate
 #include <numeric>    // accumulate
+#include <string>
+#include <cstdlib>
 
 // Includes from nestkernel:
 #include "connection_manager.h"
@@ -91,6 +93,13 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
     send_recv_buffer_shrink_spare_ = 0.1;
     send_recv_buffer_grow_extra_ = 0.5;
     send_recv_buffer_resize_log_.clear();
+
+    // EXPERIMENTAL, NOT STOCK: the fused sweep (and later the asynchronous exchange), switched on per run
+    const char* mode = std::getenv( "NEST_ASYNC" );
+    fused_ = mode != nullptr and ( std::string( mode ) == "fused" or std::string( mode ) == "async" );
+    fused_held_.clear();
+    fused_deliver_buffer_.clear();
+    fused_deliver_ready_ = false;
   }
 
   const size_t num_threads = kernel().vp_manager.get_num_threads();
@@ -597,7 +606,15 @@ EventDeliveryManager::get_global_max_spikes_per_rank_( const SendBufferPosition&
 void
 EventDeliveryManager::deliver_events( const size_t tid )
 {
-  if ( off_grid_spiking_ )
+  if ( fused_ )
+  {
+    // EXPERIMENTAL, NOT STOCK: the spikes held for this slice, delivered as stock delivers them
+    if ( fused_deliver_ready_ )
+    {
+      deliver_events_( tid, fused_deliver_buffer_, fused_deliver_chunk_ );
+    }
+  }
+  else if ( off_grid_spiking_ )
   {
     deliver_events_( tid, recv_buffer_off_grid_spike_data_ );
   }
@@ -610,7 +627,9 @@ EventDeliveryManager::deliver_events( const size_t tid )
 
 template < typename SpikeDataT >
 void
-EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< SpikeDataT >& recv_buffer )
+EventDeliveryManager::deliver_events_( const size_t tid,
+  const std::vector< SpikeDataT >& recv_buffer,
+  const size_t chunk_size_override )
 {
   // deliver only at beginning of time slice
   if ( kernel().simulation_manager.get_from_step() > 0 )
@@ -618,7 +637,8 @@ EventDeliveryManager::deliver_events_( const size_t tid, const std::vector< Spik
     return;
   }
 
-  const size_t spike_buffer_size_per_rank = kernel().mpi_manager.get_send_recv_count_spike_data_per_rank();
+  const size_t spike_buffer_size_per_rank =
+    chunk_size_override > 0 ? chunk_size_override : kernel().mpi_manager.get_send_recv_count_spike_data_per_rank();
   const std::vector< ConnectorModel* >& cm = kernel().model_manager.get_connection_models( tid );
 #ifdef CYCLE_TIMERS
   size_t deliver_connections = 0;  // connections visited by this call, added to this thread's counter once
@@ -1130,6 +1150,32 @@ Stopwatch< StopwatchGranularity::Detailed, StopwatchParallelism::MasterOnly >
 EventDeliveryManager::get_sw_collocate_spike_data() const
 {
   return sw_collocate_spike_data_;
+}
+
+// EXPERIMENTAL, NOT STOCK: the fused half-step sweep holds each exchange's spikes until the slice that delivers them.
+void
+EventDeliveryManager::hold_received_spikes( const long stamp )
+{
+  fused_held_[ stamp ] =
+    std::make_pair( recv_buffer_spike_data_, kernel().mpi_manager.get_send_recv_count_spike_data_per_rank() );
+}
+
+void
+EventDeliveryManager::prepare_fused_delivery( const long stamp )
+{
+  const auto found = fused_held_.find( stamp );
+  fused_deliver_ready_ = found != fused_held_.end();
+  if ( fused_deliver_ready_ )
+  {
+    fused_deliver_buffer_ = std::move( found->second.first );
+    fused_deliver_chunk_ = found->second.second;
+    fused_held_.erase( found );
+  }
+  // anything older than this slice can no longer be delivered
+  while ( not fused_held_.empty() and fused_held_.begin()->first < stamp )
+  {
+    fused_held_.erase( fused_held_.begin() );
+  }
 }
 
 size_t

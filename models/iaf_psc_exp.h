@@ -286,6 +286,15 @@ private:
 
   void update( const Time&, const long, const long ) override;
 
+  // EXPERIMENTAL, NOT STOCK: the fused half-step sweep; only with a deterministic threshold
+  int
+  fused_kind() const override
+  {
+    return P_.delta_ < 1e-10 ? 1 : 0;
+  }
+  void update_decision( const Time&, const long, const Time& ) override;
+  void update_input( const Time&, const long ) override;
+
   // intensity function
   double phi_() const;
 

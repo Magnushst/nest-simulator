@@ -25,6 +25,8 @@
 
 #include "event_delivery_manager.h"
 
+#include <stdexcept>
+
 // Includes from nestkernel:
 #include "connection_manager_impl.h"
 #include "kernel_manager.h"
@@ -90,6 +92,25 @@ EventDeliveryManager::send< SpikeEvent >( Node& source, SpikeEvent& e, const lon
   {
     send_local_( source, e, lag );
   }
+}
+
+inline void
+EventDeliveryManager::send_decided( Node& source, SpikeEvent& e, const Time& stamp )
+{
+  // EXPERIMENTAL, NOT STOCK: send< SpikeEvent > for a spike decided one step ahead (fused sweep). The stamp is the
+  // spike's own; the spike register gets lag 0, the lag it has in the slice that delivers it.
+  const size_t tid = source.get_thread();
+  const size_t source_node_id = source.get_node_id();
+  e.set_sender_node_id( source_node_id );
+  if ( not source.has_proxies() or source.is_off_grid() )
+  {
+    throw std::logic_error( "EXPERIMENTAL fused sweep: only on-grid neurons with proxies" );
+  }
+  local_spike_counter_[ tid ] += e.get_multiplicity();
+  e.set_stamp( stamp );
+  e.set_sender( source );
+  send_remote( tid, e, 0 );
+  kernel().connection_manager.send_to_devices( tid, source_node_id, e );
 }
 
 template <>

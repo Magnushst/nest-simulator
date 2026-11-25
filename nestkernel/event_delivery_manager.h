@@ -26,6 +26,8 @@
 // C++ includes:
 #include <cassert>
 #include <limits>
+#include <map>
+#include <utility>
 #include <vector>
 
 // Includes from libnestutil:
@@ -107,6 +109,25 @@ public:
    * @see send_to_targets()
    */
   void send_remote( size_t tid, SpikeEvent&, const long lag = 0 );
+
+  /**
+   * EXPERIMENTAL, NOT STOCK: send a spike decided one step ahead by the fused sweep. As send< SpikeEvent >, but the
+   * event carries the stamp given, and lag 0 in the slice that will deliver it.
+   */
+  void send_decided( Node& source, SpikeEvent& e, const Time& stamp );
+
+  //! EXPERIMENTAL: whether the fused sweep is on (environment variable NEST_ASYNC set to fused or async).
+  bool
+  fused() const
+  {
+    return fused_;
+  }
+
+  //! EXPERIMENTAL: keep the spikes just received (stamped `stamp`, in steps) until the slice that delivers them.
+  void hold_received_spikes( const long stamp );
+
+  //! EXPERIMENTAL: make the held spikes stamped `stamp` the ones the coming slice delivers.
+  void prepare_fused_delivery( const long stamp );
 
   /**
    * Add node ID of event sender to the spike_register.
@@ -350,7 +371,9 @@ private:
    * nodes.
    */
   template < typename SpikeDataT >
-  void deliver_events_( const size_t tid, const std::vector< SpikeDataT >& recv_buffer );
+  void deliver_events_( const size_t tid,
+    const std::vector< SpikeDataT >& recv_buffer,
+    const size_t chunk_size_override = 0 );
 
   /**
    * Deletes all spikes from spike registers and resets spike
@@ -475,6 +498,15 @@ private:
 
   std::vector< SpikeData > send_buffer_spike_data_;
   std::vector< SpikeData > recv_buffer_spike_data_;
+
+  // EXPERIMENTAL, NOT STOCK: the fused half-step sweep
+  bool fused_ = false;
+  //! received spike buffers held until their delivery, by stamp in steps, with the chunk size they were sent with
+  std::map< long, std::pair< std::vector< SpikeData >, size_t > > fused_held_;
+  //! the buffer the coming slice delivers, its chunk size, and whether there is one
+  std::vector< SpikeData > fused_deliver_buffer_;
+  size_t fused_deliver_chunk_ = 0;
+  bool fused_deliver_ready_ = false;
   std::vector< OffGridSpikeData > send_buffer_off_grid_spike_data_;
   std::vector< OffGridSpikeData > recv_buffer_off_grid_spike_data_;
 

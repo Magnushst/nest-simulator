@@ -133,6 +133,13 @@ public:
 private:
   void pre_run_hook() override;
   void update( Time const&, const long, const long ) override;
+
+  // EXPERIMENTAL, NOT STOCK: the fused sweep runs the whole update at the device's place
+  int
+  fused_kind() const override
+  {
+    return 2;
+  }
 };
 
 inline size_t

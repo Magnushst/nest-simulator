@@ -347,6 +347,66 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
   }
 }
 
+// EXPERIMENTAL, NOT STOCK: the fused half-step sweep. The statements of update() above, unchanged, split in two:
+// the decision half (the potential and the threshold) and the input half (the currents, the input slot, the logger).
+// The threshold reads only V, which the input half neither reads nor writes, so decision then input equals update().
+void
+nest::iaf_psc_exp::update_decision( const Time&, const long, const Time& stamp )
+{
+  if ( S_.r_ref_ == 0 )  // neuron not refractory, so evolve V
+  {
+    S_.V_m_ =
+      S_.V_m_ * V_.P22_ + S_.i_syn_ex_ * V_.P21ex_ + S_.i_syn_in_ * V_.P21in_ + ( P_.I_e_ + S_.i_0_ ) * V_.P20_;
+  }
+  else
+  {
+    // neuron is absolute refractory
+    --S_.r_ref_;
+  }
+
+  if ( S_.V_m_ >= P_.Theta_ )  // deterministic threshold crossing (fused_kind() requires it)
+  {
+    S_.r_ref_ = V_.RefractoryCounts_;
+    S_.V_m_ = P_.V_reset_;
+
+    set_spiketime( stamp );
+
+    SpikeEvent se;
+    kernel().event_delivery_manager.send_decided( *this, se, stamp );
+  }
+}
+
+void
+nest::iaf_psc_exp::update_input( const Time& origin, const long lag )
+{
+  // exponential decaying PSCs
+  S_.i_syn_ex_ *= V_.P11ex_;
+  S_.i_syn_in_ *= V_.P11in_;
+
+  // add evolution of presynaptic input current
+  S_.i_syn_ex_ += ( 1. - V_.P11ex_ ) * S_.i_1_;
+
+  // get read access to the correct input-buffer slot
+  const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( lag );
+  auto& input = B_.input_buffer_.get_values_all_channels( input_buffer_slot );
+
+  V_.weighted_spikes_ex_ = input[ Buffers_::SYN_EX ];
+  V_.weighted_spikes_in_ = input[ Buffers_::SYN_IN ];
+
+  S_.i_syn_ex_ += V_.weighted_spikes_ex_;
+  S_.i_syn_in_ += V_.weighted_spikes_in_;
+
+  // set new input current
+  S_.i_0_ = input[ Buffers_::I0 ];
+  S_.i_1_ = input[ Buffers_::I1 ];
+
+  // reset all values in the currently processed input-buffer slot
+  B_.input_buffer_.reset_values_all_channels( input_buffer_slot );
+
+  // log state data
+  B_.logger_.record_data( origin.get_steps() + lag );
+}
+
 void
 nest::iaf_psc_exp::handle( SpikeEvent& e )
 {

@@ -23,6 +23,9 @@
 #include "simulation_manager.h"
 
 // C includes:
+#include <string>
+#include <iostream>
+#include <cstdlib>
 #include <sys/time.h>
 
 // C++ includes:
@@ -97,6 +100,18 @@ nest::SimulationManager::initialize( const bool adjust_number_of_threads_or_rng_
   inconsistent_state_ = false;
   print_time_ = false;
   use_wfr_ = true;
+
+  // EXPERIMENTAL, NOT STOCK: the fused half-step sweep, switched on per run
+  const char* fused_mode = std::getenv( "NEST_ASYNC" );
+  fused_ = fused_mode != nullptr and ( std::string( fused_mode ) == "fused" or std::string( fused_mode ) == "async" );
+  const char* fused_broken = std::getenv( "NEST_ASYNC_BREAK" );
+  fused_break_ = ( fused_ and fused_broken != nullptr and std::string( fused_broken ) == "decision_first" ) ? 1 : 0;
+  fused_decided_ = false;
+  if ( fused_ )
+  {
+    std::cerr << "EXPERIMENTAL NOT STOCK: fused half-step sweep is on"
+              << ( fused_break_ ? " (negative control: decision half first)" : "" ) << std::endl;
+  }
 
   wfr_comm_interval_ = 1.0;
   wfr_tol_ = 0.0001;
@@ -834,6 +849,36 @@ nest::SimulationManager::update_connection_infrastructure( const size_t tid )
   sw_communicate_prepare_.stop();
 }
 
+void
+nest::SimulationManager::check_fused_support_() const
+{
+  // EXPERIMENTAL, NOT STOCK: what the fused half-step sweep supports so far
+  if ( kernel().connection_manager.get_min_delay() != 1 )
+  {
+    throw KernelException( "EXPERIMENTAL fused sweep: needs a minimum delay of one step" );
+  }
+  if ( kernel().connection_manager.secondary_connections_exist() or kernel().node_manager.wfr_is_used()
+    or kernel().sp_manager.is_structural_plasticity_enabled()
+    or kernel().event_delivery_manager.get_off_grid_communication() )
+  {
+    throw KernelException(
+      "EXPERIMENTAL fused sweep: secondary events, waveform relaxation, structural plasticity and off-grid spikes are "
+      "not supported" );
+  }
+  for ( size_t t = 0; t < kernel().vp_manager.get_num_threads(); ++t )
+  {
+    const SparseNodeArray& nodes = kernel().node_manager.get_local_nodes( t );
+    for ( SparseNodeArray::const_iterator n = nodes.begin(); n != nodes.end(); ++n )
+    {
+      if ( n->get_node()->fused_kind() == 0 )
+      {
+        throw KernelException( "EXPERIMENTAL fused sweep: node model " + n->get_node()->get_name()
+          + " is not supported" );
+      }
+    }
+  }
+}
+
 bool
 nest::SimulationManager::wfr_update_( Node* n )
 {
@@ -893,6 +938,11 @@ nest::SimulationManager::update_()
   };
 #endif
 
+  if ( fused_ )
+  {
+    check_fused_support_();  // EXPERIMENTAL, NOT STOCK
+  }
+
 // parallel section begins
 #pragma omp parallel
   {
@@ -902,8 +952,45 @@ nest::SimulationManager::update_()
     // exceptions here and then handle them after the parallel region.
     try
     {
+      if ( fused_ and not fused_decided_ )
+      {
+        // EXPERIMENTAL, NOT STOCK: the prologue of the fused sweep. Run the decision half of the current step and
+        // exchange its spikes; every later slice then runs one step's input half and the next step's decision half.
+        const SparseNodeArray& prologue_nodes = kernel().node_manager.get_local_nodes( tid );
+        const Time prologue_stamp = Time::step( clock_.get_steps() + 1 );
+        for ( SparseNodeArray::const_iterator n = prologue_nodes.begin(); n != prologue_nodes.end(); ++n )
+        {
+          Node* node = n->get_node();
+          if ( not node->is_frozen() and node->fused_kind() == 1 )
+          {
+            node->update_decision( clock_, 0, prologue_stamp );
+          }
+        }
+#pragma omp barrier
+#pragma omp master
+        {
+          if ( kernel().connection_manager.has_primary_connections() )
+          {
+            kernel().event_delivery_manager.gather_spike_data();
+            kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 1 );
+          }
+          fused_decided_ = true;
+        }
+#pragma omp barrier
+      }
+
       do
       {
+        if ( fused_ and from_step_ == 0 )
+        {
+          // EXPERIMENTAL, NOT STOCK: this slice delivers the spikes held for its time
+#pragma omp master
+          {
+            kernel().event_delivery_manager.prepare_fused_delivery( clock_.get_steps() );
+          }
+#pragma omp barrier
+        }
+
         if ( print_time_ )
         {
           gettimeofday( &t_slice_begin_, nullptr );
@@ -911,7 +998,7 @@ nest::SimulationManager::update_()
 
         // Do not deliver events at beginning of first slice, nothing can be there yet
         // and invalid markers have not been properly set in send buffers.
-        if ( slice_ > 0 and from_step_ == 0 )
+        if ( ( slice_ > 0 or fused_ ) and from_step_ == 0 )
         {
           // Deliver secondary events before primary events
           //
@@ -1096,12 +1183,50 @@ nest::SimulationManager::update_()
         sw_update_.start();
         const SparseNodeArray& thread_local_nodes = kernel().node_manager.get_local_nodes( tid );
 
-        for ( SparseNodeArray::const_iterator n = thread_local_nodes.begin(); n != thread_local_nodes.end(); ++n )
+        if ( fused_ )
         {
-          Node* node = n->get_node();
-          if ( not( node )->is_frozen() )
+          // EXPERIMENTAL, NOT STOCK: the fused sweep, in node order: each neuron's input half of this step, then its
+          // decision half of the next (not in the slice that ends the call); devices update in place.
+          const bool last_slice = to_do_ <= to_step_ - from_step_;
+          const Time decision_stamp = Time::step( clock_.get_steps() + 2 );
+          for ( SparseNodeArray::const_iterator n = thread_local_nodes.begin(); n != thread_local_nodes.end(); ++n )
           {
-            ( node )->update( clock_, from_step_, to_step_ );
+            Node* node = n->get_node();
+            if ( node->is_frozen() )
+            {
+              continue;
+            }
+            if ( node->fused_kind() == 1 )
+            {
+              if ( fused_break_ and not last_slice )
+              {
+                node->update_decision( clock_, 0, decision_stamp );  // negative control: wrong order
+                node->update_input( clock_, 0 );
+              }
+              else
+              {
+                node->update_input( clock_, 0 );
+                if ( not last_slice )
+                {
+                  node->update_decision( clock_, 0, decision_stamp );
+                }
+              }
+            }
+            else
+            {
+              node->update( clock_, from_step_, to_step_ );
+            }
+          }
+        }
+        else
+        {
+          for ( SparseNodeArray::const_iterator n = thread_local_nodes.begin(); n != thread_local_nodes.end(); ++n )
+          {
+            Node* node = n->get_node();
+            if ( not( node )->is_frozen() )
+            {
+              ( node )->update( clock_, from_step_, to_step_ );
+            }
           }
         }
 
@@ -1137,6 +1262,11 @@ nest::SimulationManager::update_()
             {
               sw_gather_spike_data_.start();
               kernel().event_delivery_manager.gather_spike_data();
+              if ( fused_ )
+              {
+                // EXPERIMENTAL, NOT STOCK: the spikes just decided are stamped two steps ahead
+                kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 2 );
+              }
               sw_gather_spike_data_.stop();
 #ifdef CYCLE_TIMERS
               spike_buffer_first = kernel().event_delivery_manager.get_spike_buffer_first();
@@ -1255,6 +1385,17 @@ nest::SimulationManager::update_()
 #endif
 
       } while ( to_do_ > 0 );
+
+      if ( fused_ )
+      {
+        // EXPERIMENTAL, NOT STOCK: the call's last slice ran no decision half
+#pragma omp barrier
+#pragma omp master
+        {
+          fused_decided_ = false;
+        }
+#pragma omp barrier
+      }
 
       // End of the slice, we update the number of synaptic elements
       for ( SparseNodeArray::const_iterator i = kernel().node_manager.get_local_nodes( tid ).begin();

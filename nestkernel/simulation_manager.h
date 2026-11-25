@@ -211,6 +211,12 @@ private:
                                     //!< simulated for sometime
   bool inconsistent_state_;         //!< true after exception during update_
                                     //!< simulation must not be resumed
+  // EXPERIMENTAL, NOT STOCK: the fused half-step sweep (NEST_ASYNC set to fused or async)
+  bool fused_ = false;         //!< the fused sweep is on
+  bool fused_decided_ = false; //!< the decision half of the current step has already run
+  int fused_break_ = 0;        //!< negative control (NEST_ASYNC_BREAK=decision_first): the halves swapped
+  void check_fused_support_() const; //!< throws unless the network is one the fused sweep supports
+
   bool print_time_;                 //!< Indicates whether time should be printed during
                                     //!< simulations (or not)
   bool use_wfr_;                    //!< Indicates wheter waveform relaxation is used

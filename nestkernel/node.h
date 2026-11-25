@@ -27,6 +27,7 @@
 #include <bitset>
 #include <deque>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -295,6 +296,31 @@ public:
    *
    */
   virtual void update( Time const&, const long, const long ) = 0;
+
+  /**
+   * EXPERIMENTAL, NOT STOCK: the fused half-step sweep (sp4-direction-scoping/async_2026-11-24/THEORY.md, Variant
+   * 2.3'). 0: not supported; 1: a neuron whose update splits into a decision half and an input half; 2: a device whose
+   * whole update runs at its place in the input half.
+   */
+  virtual int
+  fused_kind() const
+  {
+    return 0;
+  }
+
+  //! EXPERIMENTAL: the decision half of the update from origin + lag; a spike carries the stamp given.
+  virtual void
+  update_decision( Time const&, const long, Time const& )
+  {
+    throw std::logic_error( "EXPERIMENTAL fused sweep: update_decision not implemented for this node" );
+  }
+
+  //! EXPERIMENTAL: the input half of the update from origin + lag.
+  virtual void
+  update_input( Time const&, const long )
+  {
+    throw std::logic_error( "EXPERIMENTAL fused sweep: update_input not implemented for this node" );
+  }
 
   /**
    * Advance the state of the node in time through the given interval (see

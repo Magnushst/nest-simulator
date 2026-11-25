@@ -190,6 +190,9 @@ public:
   //! EXPERIMENTAL: add the inputs thread tid kept, in the order they came.
   void apply_deferred_inputs( const size_t tid );
 
+  //! EXPERIMENTAL: the spike count and digest of this rank, summed over threads (check 5)
+  void experimental_spike_digest( std::uint64_t& count, std::uint64_t& digest ) const;
+
   //! EXPERIMENTAL: the master's cumulative exchange times (s) and what it posted, for the cycle log.
   void
   get_exchange_totals( double& post, double& wait, double& receive, double& complete, size_t& messages,
@@ -596,6 +599,9 @@ private:
     double value;
   };
   std::vector< std::vector< DeferredInput > > deferred_inputs_;
+  //! EXPERIMENTAL: per thread, the spikes sent and their digest (check 5)
+  std::vector< std::uint64_t > experimental_spike_count_;
+  std::vector< std::uint64_t > experimental_spike_digest_;
 
   // EXPERIMENTAL, NOT STOCK: the asynchronous exchange
   bool async_ = false;

@@ -24,6 +24,8 @@
 #define IAF_PSC_EXP_H
 
 // Includes from nestkernel:
+#include <cstdint>
+#include <bit>
 #include "archiving_node.h"
 #include "connection.h"
 #include "event.h"
@@ -295,6 +297,18 @@ private:
   void update_decision( const Time&, const long, const Time& ) override;
   void update_input( const Time&, const long ) override;
   void apply_deferred_input( const long, const int, const double ) override;
+  bool
+  experimental_state_hash( std::uint64_t& h ) const override
+  {
+    // EXPERIMENTAL, NOT STOCK: every state variable's bits (check 5)
+    h = 0;
+    for ( const double v : { S_.V_m_, S_.i_syn_ex_, S_.i_syn_in_, S_.i_0_, S_.i_1_ } )
+    {
+      h = experimental_digest_mix( h ^ std::bit_cast< std::uint64_t >( v ) );
+    }
+    h = experimental_digest_mix( h ^ static_cast< std::uint64_t >( S_.r_ref_ ) );
+    return true;
+  }
 
   // intensity function
   double phi_() const;

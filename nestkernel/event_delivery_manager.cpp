@@ -20,6 +20,8 @@
  *
  */
 
+#include <sstream>
+#include <iomanip>
 #include "event_delivery_manager.h"
 
 // C++ includes:
@@ -150,6 +152,17 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
   const size_t num_threads = kernel().vp_manager.get_num_threads();
 
   local_spike_counter_.resize( num_threads, 0 );
+  // EXPERIMENTAL, NOT STOCK: the digests start afresh with the kernel, and keep their values when threads change
+  if ( not adjust_number_of_threads_or_rng_only )
+  {
+    experimental_spike_count_.assign( num_threads, 0 );
+    experimental_spike_digest_.assign( num_threads, 0 );
+  }
+  else
+  {
+    experimental_spike_count_.resize( num_threads, 0 );
+    experimental_spike_digest_.resize( num_threads, 0 );
+  }
   reset_counters();
 #ifdef CYCLE_TIMERS
   local_deliver_connections_.resize( num_threads, 0 );
@@ -177,6 +190,20 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
 void
 EventDeliveryManager::finalize( const bool adjust_number_of_threads_or_rng_only )
 {
+  // EXPERIMENTAL, NOT STOCK: print the digests at the reset of the kernel (check 5)
+  if ( not adjust_number_of_threads_or_rng_only )
+  {
+    std::uint64_t count = 0;
+    std::uint64_t digest = 0;
+    experimental_spike_digest( count, digest );
+    if ( count > 0 )
+    {
+      std::cerr << "EXPERIMENTAL NOT STOCK: digests, rank " << kernel().mpi_manager.get_rank() << ": spikes "
+                << count << ", spike digest " << std::hex << std::setw( 16 ) << std::setfill( '0' ) << digest
+                << ", state digest " << std::setw( 16 ) << kernel().simulation_manager.experimental_state_digest()
+                << std::dec << std::setfill( ' ' ) << std::endl;
+    }
+  }
   // EXPERIMENTAL, NOT STOCK: drain the asynchronous exchange (the reset of the kernel is collective)
   if ( ( async_ or lockstep_p2p_ ) and not adjust_number_of_threads_or_rng_only )
   {
@@ -271,6 +298,30 @@ EventDeliveryManager::get_status( Dictionary& dict )
     dict, names::time_communicate_spike_data, names::time_communicate_spike_data_cpu );
   sw_communicate_target_data_.get_status(
     dict, names::time_communicate_target_data, names::time_communicate_target_data_cpu );
+
+  // EXPERIMENTAL, NOT STOCK: the digests (check 5), as text so that every bit survives the logfile
+  std::uint64_t count = 0;
+  std::uint64_t digest = 0;
+  experimental_spike_digest( count, digest );
+  std::ostringstream text;
+  text << std::hex << std::setw( 16 ) << std::setfill( '0' ) << digest;
+  dict[ std::string( "experimental_spike_count" ) ] = static_cast< long >( count );
+  dict[ std::string( "experimental_spike_digest" ) ] = text.str();
+  std::ostringstream state;
+  state << std::hex << std::setw( 16 ) << std::setfill( '0' ) << kernel().simulation_manager.experimental_state_digest();
+  dict[ std::string( "experimental_state_digest" ) ] = state.str();
+}
+
+void
+EventDeliveryManager::experimental_spike_digest( std::uint64_t& count, std::uint64_t& digest ) const
+{
+  count = 0;
+  digest = 0;
+  for ( size_t t = 0; t < experimental_spike_count_.size(); ++t )
+  {
+    count += experimental_spike_count_[ t ];
+    digest += experimental_spike_digest_[ t ];
+  }
 }
 
 void

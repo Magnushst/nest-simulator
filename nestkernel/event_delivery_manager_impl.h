@@ -128,6 +128,12 @@ EventDeliveryManager::send_remote( size_t tid, SpikeEvent& e, const long lag )
   const size_t lid = kernel().vp_manager.node_id_to_lid( e.get_sender().get_node_id() );
   const auto& targets = kernel().connection_manager.get_remote_targets_of_local_node( tid, lid );
 
+  // EXPERIMENTAL, NOT STOCK: the spike digest (check 5); reading only
+  experimental_spike_count_[ tid ] += e.get_multiplicity();
+  experimental_spike_digest_[ tid ] += experimental_digest_mix(
+    experimental_digest_mix( e.get_sender().get_node_id() ) ^ static_cast< std::uint64_t >( e.get_stamp().get_steps() ) )
+    * e.get_multiplicity();
+
   for ( const auto& target : targets )
   {
     // Unroll spike multiplicity as plastic synapses only handle individual spikes.

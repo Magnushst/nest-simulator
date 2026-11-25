@@ -24,6 +24,7 @@
 #define NODE_H
 
 // C++ includes:
+#include <cstdint>
 #include <bitset>
 #include <deque>
 #include <sstream>
@@ -49,6 +50,17 @@
 
 namespace nest
 {
+
+//! EXPERIMENTAL, NOT STOCK: SplitMix64's finaliser, the hash of the digests (CHECK_ASYNC.md, check 5)
+inline std::uint64_t
+experimental_digest_mix( std::uint64_t x )
+{
+  x += 0x9e3779b97f4a7c15ULL;
+  x = ( x ^ ( x >> 30 ) ) * 0xbf58476d1ce4e5b9ULL;
+  x = ( x ^ ( x >> 27 ) ) * 0x94d049bb133111ebULL;
+  return x ^ ( x >> 31 );
+}
+
 class Model;
 class ArchivingNode;
 class TimeConverter;
@@ -314,6 +326,13 @@ public:
   update_decision( Time const&, const long, Time const& )
   {
     throw std::logic_error( "EXPERIMENTAL fused sweep: update_decision not implemented for this node" );
+  }
+
+  //! EXPERIMENTAL: a hash of every state variable's bits, for the state digest; false for nodes without state.
+  virtual bool
+  experimental_state_hash( std::uint64_t& ) const
+  {
+    return false;
   }
 
   //! EXPERIMENTAL: add a device input kept by the plain asynchronous exchange, rel steps after the slice origin.

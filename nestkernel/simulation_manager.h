@@ -24,6 +24,7 @@
 #define SIMULATION_MANAGER_H
 
 // C includes:
+#include <cstdint>
 #include <sys/time.h>
 
 // C++ includes:
@@ -216,6 +217,23 @@ private:
   bool fused_decided_ = false; //!< the decision half of the current step has already run
   bool plain_ = false;         //!< the plain asynchronous exchange (NEST_ASYNC=async_plain)
   void check_plain_support_() const; //!< throws unless the network is one the plain exchange supports
+  //! EXPERIMENTAL: per thread, the state digest at the end of the last Simulate call (check 5)
+  std::vector< std::uint64_t > experimental_state_digest_;
+
+public:
+  //! EXPERIMENTAL: this rank's state digest at the end of the last Simulate call (check 5)
+  std::uint64_t
+  experimental_state_digest() const
+  {
+    std::uint64_t d = 0;
+    for ( const std::uint64_t v : experimental_state_digest_ )
+    {
+      d += v;
+    }
+    return d;
+  }
+
+private:
   int fused_break_ = 0;        //!< negative control (NEST_ASYNC_BREAK=decision_first): the halves swapped
   void check_fused_support_() const; //!< throws unless the network is one the fused sweep supports
 

@@ -944,6 +944,8 @@ nest::SimulationManager::update_()
 {
   // to store done values of the different threads
   std::vector< bool > done;
+  // EXPERIMENTAL, NOT STOCK: one state digest slot per thread, written at the end of this call (check 5)
+  experimental_state_digest_.assign( kernel().vp_manager.get_num_threads(), 0 );
   bool done_all = true;
   long old_to_step;
 
@@ -1552,6 +1554,21 @@ nest::SimulationManager::update_()
           fused_decided_ = false;
         }
 #pragma omp barrier
+      }
+
+      // EXPERIMENTAL, NOT STOCK: this thread's neurons' state at the end of the call, in its own slot (check 5)
+      {
+        std::uint64_t digest = 0;
+        const SparseNodeArray& digest_nodes = kernel().node_manager.get_local_nodes( tid );
+        for ( SparseNodeArray::const_iterator n = digest_nodes.begin(); n != digest_nodes.end(); ++n )
+        {
+          std::uint64_t h = 0;
+          if ( n->get_node()->experimental_state_hash( h ) )
+          {
+            digest += experimental_digest_mix( experimental_digest_mix( n->get_node()->get_node_id() ) ^ h );
+          }
+        }
+        experimental_state_digest_[ tid ] = digest;
       }
 
       // End of the slice, we update the number of synaptic elements

@@ -24,6 +24,8 @@
 #define IAF_PSC_DELTA_H
 
 // Includes from nestkernel:
+#include <cstdint>
+#include <bit>
 #include "archiving_node.h"
 #include "connection.h"
 #include "event.h"
@@ -243,6 +245,18 @@ private:
     return 3;
   }
   void apply_deferred_input( const long, const int, const double ) override;
+  bool
+  experimental_state_hash( std::uint64_t& h ) const override
+  {
+    // EXPERIMENTAL, NOT STOCK: every state variable's bits (check 5)
+    h = 0;
+    for ( const double v : { S_.y0_, S_.y3_, S_.refr_spikes_buffer_ } )
+    {
+      h = experimental_digest_mix( h ^ std::bit_cast< std::uint64_t >( v ) );
+    }
+    h = experimental_digest_mix( h ^ static_cast< std::uint64_t >( S_.r_ ) );
+    return true;
+  }
 
   // The next two classes need to be friends to access the State_ class/member
   friend class RecordablesMap< iaf_psc_delta >;

@@ -110,6 +110,7 @@ nest::SimulationManager::initialize( const bool adjust_number_of_threads_or_rng_
   if ( fused_ )
   {
     std::cerr << "EXPERIMENTAL NOT STOCK: fused half-step sweep is on"
+              << ( std::string( fused_mode ) == "async" ? " (asynchronous exchange)" : "" )
               << ( fused_break_ ? " (negative control: decision half first)" : "" ) << std::endl;
   }
 
@@ -852,30 +853,36 @@ nest::SimulationManager::update_connection_infrastructure( const size_t tid )
 void
 nest::SimulationManager::check_fused_support_() const
 {
-  // EXPERIMENTAL, NOT STOCK: what the fused half-step sweep supports so far
+  // EXPERIMENTAL, NOT STOCK: what the fused half-step sweep supports so far. Collective: every rank stops if one
+  // fails, since the others would otherwise wait for its messages.
+  std::string failure;
   if ( kernel().connection_manager.get_min_delay() != 1 )
   {
-    throw KernelException( "EXPERIMENTAL fused sweep: needs a minimum delay of one step" );
+    failure = "EXPERIMENTAL fused sweep: needs a minimum delay of one step";
   }
-  if ( kernel().connection_manager.secondary_connections_exist() or kernel().node_manager.wfr_is_used()
+  else if ( kernel().connection_manager.secondary_connections_exist() or kernel().node_manager.wfr_is_used()
     or kernel().sp_manager.is_structural_plasticity_enabled()
     or kernel().event_delivery_manager.get_off_grid_communication() )
   {
-    throw KernelException(
-      "EXPERIMENTAL fused sweep: secondary events, waveform relaxation, structural plasticity and off-grid spikes are "
-      "not supported" );
+    failure = "EXPERIMENTAL fused sweep: secondary events, waveform relaxation, structural plasticity and "
+              "off-grid spikes are not supported";
   }
-  for ( size_t t = 0; t < kernel().vp_manager.get_num_threads(); ++t )
+  for ( size_t t = 0; failure.empty() and t < kernel().vp_manager.get_num_threads(); ++t )
   {
     const SparseNodeArray& nodes = kernel().node_manager.get_local_nodes( t );
     for ( SparseNodeArray::const_iterator n = nodes.begin(); n != nodes.end(); ++n )
     {
       if ( n->get_node()->fused_kind() == 0 )
       {
-        throw KernelException( "EXPERIMENTAL fused sweep: node model " + n->get_node()->get_name()
-          + " is not supported" );
+        failure = "EXPERIMENTAL fused sweep: node model " + n->get_node()->get_name() + " is not supported";
+        break;
       }
     }
+  }
+  if ( kernel().mpi_manager.any_true( not failure.empty() ) )
+  {
+    throw KernelException(
+      failure.empty() ? "EXPERIMENTAL fused sweep: another rank holds something the sweep does not support" : failure );
   }
 }
 
@@ -971,8 +978,15 @@ nest::SimulationManager::update_()
         {
           if ( kernel().connection_manager.has_primary_connections() )
           {
-            kernel().event_delivery_manager.gather_spike_data();
-            kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 1 );
+            if ( kernel().event_delivery_manager.async_exchange() )
+            {
+              kernel().event_delivery_manager.async_send( clock_.get_steps() + 1 );
+            }
+            else
+            {
+              kernel().event_delivery_manager.gather_spike_data();
+              kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 1 );
+            }
           }
           fused_decided_ = true;
         }
@@ -1261,11 +1275,22 @@ nest::SimulationManager::update_()
             if ( kernel().connection_manager.has_primary_connections() )
             {
               sw_gather_spike_data_.start();
-              kernel().event_delivery_manager.gather_spike_data();
-              if ( fused_ )
+              if ( kernel().event_delivery_manager.async_exchange() )
               {
-                // EXPERIMENTAL, NOT STOCK: the spikes just decided are stamped two steps ahead
-                kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 2 );
+                // EXPERIMENTAL, NOT STOCK: post the spikes just decided, unless this slice decided none
+                if ( to_do_ > to_step_ - from_step_ )
+                {
+                  kernel().event_delivery_manager.async_send( clock_.get_steps() + 2 );
+                }
+              }
+              else
+              {
+                kernel().event_delivery_manager.gather_spike_data();
+                if ( fused_ )
+                {
+                  // EXPERIMENTAL, NOT STOCK: the spikes just decided are stamped two steps ahead
+                  kernel().event_delivery_manager.hold_received_spikes( clock_.get_steps() + 2 );
+                }
               }
               sw_gather_spike_data_.stop();
 #ifdef CYCLE_TIMERS

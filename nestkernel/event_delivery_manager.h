@@ -27,6 +27,7 @@
 #include <cassert>
 #include <limits>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -128,6 +129,19 @@ public:
 
   //! EXPERIMENTAL: make the held spikes stamped `stamp` the ones the coming slice delivers.
   void prepare_fused_delivery( const long stamp );
+
+  //! EXPERIMENTAL: whether the asynchronous exchange is on (NEST_ASYNC=async).
+  bool
+  async_exchange() const
+  {
+    return async_;
+  }
+
+  /**
+   * EXPERIMENTAL: post this slice's new spikes (stamped `stamp`) to every rank, point to point, without waiting.
+   * Master thread only.
+   */
+  void async_send( const long stamp );
 
   /**
    * Add node ID of event sender to the spike_register.
@@ -507,6 +521,30 @@ private:
   std::vector< SpikeData > fused_deliver_buffer_;
   size_t fused_deliver_chunk_ = 0;
   bool fused_deliver_ready_ = false;
+
+  // EXPERIMENTAL, NOT STOCK: the asynchronous exchange
+  bool async_ = false;
+  //! negative control (NEST_ASYNC_BREAK=reverse_ranks): the ranks' spikes delivered in reverse order
+  bool async_break_reverse_ = false;
+  //! checks only: the largest pseudo-random delay before a post, in microseconds (NEST_ASYNC_JITTER_US)
+  long async_jitter_us_ = 0;
+  //! checks only: measure how far other ranks ran ahead (NEST_ASYNC_STATS)
+  bool async_stats_ = false;
+  //! counts for the check: stamps posted, messages sent and received, the largest lead of another rank in slices
+  size_t async_stamps_ = 0;
+  size_t async_messages_sent_ = 0;
+  size_t async_messages_received_ = 0;
+  long async_largest_lead_ = -1;
+  //! stamps whose messages are in flight
+  std::set< long > async_expected_;
+#ifdef HAVE_MPI
+  //! send buffers and requests of the messages posted, by stamp
+  std::map< long, std::pair< std::vector< std::vector< SpikeData > >, std::vector< MPI_Request > > > async_sent_;
+#endif
+  //! receive the stamp's messages from every rank and build the buffer stock delivery reads
+  void async_receive_( const long stamp );
+  //! complete every send posted for stamps up to `stamp`
+  void async_complete_sends_( const long stamp );
   std::vector< OffGridSpikeData > send_buffer_off_grid_spike_data_;
   std::vector< OffGridSpikeData > recv_buffer_off_grid_spike_data_;
 

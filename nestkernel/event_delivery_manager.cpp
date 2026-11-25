@@ -25,6 +25,12 @@
 // C++ includes:
 #include <algorithm>  // rotate
 #include <numeric>    // accumulate
+#include <thread>
+#include <stdexcept>
+#include <limits>
+#include <iostream>
+#include <cstdint>
+#include <chrono>
 #include <string>
 #include <cstdlib>
 
@@ -97,6 +103,26 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
     // EXPERIMENTAL, NOT STOCK: the fused sweep (and later the asynchronous exchange), switched on per run
     const char* mode = std::getenv( "NEST_ASYNC" );
     fused_ = mode != nullptr and ( std::string( mode ) == "fused" or std::string( mode ) == "async" );
+    async_ = mode != nullptr and std::string( mode ) == "async";
+    const char* broken = std::getenv( "NEST_ASYNC_BREAK" );
+    async_break_reverse_ = async_ and broken != nullptr and std::string( broken ) == "reverse_ranks";
+    const char* jitter = std::getenv( "NEST_ASYNC_JITTER_US" );
+    async_jitter_us_ = ( async_ and jitter != nullptr ) ? std::max( 0L, std::atol( jitter ) ) : 0;
+    async_stats_ = async_ and std::getenv( "NEST_ASYNC_STATS" ) != nullptr;
+    async_stamps_ = 0;
+    async_messages_sent_ = 0;
+    async_messages_received_ = 0;
+    async_largest_lead_ = -1;
+    async_expected_.clear();
+    if ( async_break_reverse_ )
+    {
+      std::cerr << "EXPERIMENTAL NOT STOCK: negative control: ranks delivered in reverse order" << std::endl;
+    }
+    if ( async_jitter_us_ > 0 )
+    {
+      std::cerr << "EXPERIMENTAL NOT STOCK: jitter up to " << async_jitter_us_ << " us before each post"
+                << std::endl;
+    }
     fused_held_.clear();
     fused_deliver_buffer_.clear();
     fused_deliver_ready_ = false;
@@ -130,8 +156,24 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
 }
 
 void
-EventDeliveryManager::finalize( const bool )
+EventDeliveryManager::finalize( const bool adjust_number_of_threads_or_rng_only )
 {
+  // EXPERIMENTAL, NOT STOCK: drain the asynchronous exchange (the reset of the kernel is collective)
+  if ( async_ and not adjust_number_of_threads_or_rng_only )
+  {
+    while ( not async_expected_.empty() )
+    {
+      async_receive_( *async_expected_.begin() );
+    }
+    async_complete_sends_( std::numeric_limits< long >::max() );
+    if ( async_stamps_ > 0 )
+    {
+      std::cerr << "EXPERIMENTAL NOT STOCK: asynchronous exchange, rank " << kernel().mpi_manager.get_rank()
+                << ": stamps " << async_stamps_ << ", messages sent " << async_messages_sent_ << ", received "
+                << async_messages_received_ << ", largest lead " << async_largest_lead_ << " slices" << std::endl;
+    }
+    async_stamps_ = 0;
+  }
   // clear the spike buffers
   for ( auto& vec_spikedata_ptr : emitted_spikes_register_ )
   {
@@ -1163,6 +1205,17 @@ EventDeliveryManager::hold_received_spikes( const long stamp )
 void
 EventDeliveryManager::prepare_fused_delivery( const long stamp )
 {
+  if ( async_ )
+  {
+    // EXPERIMENTAL, NOT STOCK: the counted completion of this stamp's messages; own sends complete two slices late
+    fused_deliver_ready_ = async_expected_.count( stamp ) > 0;
+    if ( fused_deliver_ready_ )
+    {
+      async_receive_( stamp );
+    }
+    async_complete_sends_( stamp - 2 );
+    return;
+  }
   const auto found = fused_held_.find( stamp );
   fused_deliver_ready_ = found != fused_held_.end();
   if ( fused_deliver_ready_ )
@@ -1176,6 +1229,165 @@ EventDeliveryManager::prepare_fused_delivery( const long stamp )
   {
     fused_held_.erase( fused_held_.begin() );
   }
+}
+
+
+#ifdef HAVE_MPI
+namespace
+{
+MPI_Comm
+async_comm()
+{
+  // one duplicate of NEST's communicator for the whole run, made at the first exchange, which every rank reaches
+  static MPI_Comm comm = MPI_COMM_NULL;
+  if ( comm == MPI_COMM_NULL )
+  {
+    MPI_Comm_dup( kernel().mpi_manager.get_communicator(), &comm );
+  }
+  return comm;
+}
+
+int
+async_tag( const long stamp )
+{
+  // a rank runs at most two slices ahead of any other, so at most four stamps are in flight between two ranks
+  return static_cast< int >( stamp % 32768 );
+}
+
+std::uint64_t
+async_mix( std::uint64_t x )
+{
+  // SplitMix64's finaliser: a local hash for the checks' jitter, independent of NEST's random streams
+  x += 0x9e3779b97f4a7c15ULL;
+  x = ( x ^ ( x >> 30 ) ) * 0xbf58476d1ce4e5b9ULL;
+  x = ( x ^ ( x >> 27 ) ) * 0x94d049bb133111ebULL;
+  return x ^ ( x >> 31 );
+}
+} // namespace
+#endif
+
+void
+EventDeliveryManager::async_send( const long stamp )
+{
+#ifdef HAVE_MPI
+  const size_t num_processes = kernel().mpi_manager.get_num_processes();
+  if ( async_jitter_us_ > 0 )
+  {
+    const std::uint64_t key =
+      ( static_cast< std::uint64_t >( kernel().mpi_manager.get_rank() ) << 40 ) ^ static_cast< std::uint64_t >( stamp );
+    std::this_thread::sleep_for(
+      std::chrono::microseconds( async_mix( key ) % static_cast< std::uint64_t >( async_jitter_us_ + 1 ) ) );
+  }
+  // collocate in stock order: writing thread, then entry order (collocate_spike_data_buffers_)
+  std::vector< std::vector< SpikeData > > per_rank( num_processes );
+  for ( auto& emitted_spikes_per_thread : emitted_spikes_register_ )
+  {
+    for ( auto& emitted_spike : *emitted_spikes_per_thread )
+    {
+      per_rank.at( emitted_spike.rank ).push_back( emitted_spike.spike_data );  // as collocate_spike_data_buffers_
+    }
+  }
+  auto& slot = async_sent_[ stamp ];
+  slot.first = std::move( per_rank );
+  slot.second.assign( num_processes, MPI_REQUEST_NULL );
+  for ( size_t r = 0; r < num_processes; ++r )
+  {
+    MPI_Isend( slot.first.at( r ).data(),
+      static_cast< int >( slot.first.at( r ).size() * sizeof( SpikeData ) ),
+      MPI_BYTE,
+      static_cast< int >( r ),
+      async_tag( stamp ),
+      async_comm(),
+      &slot.second.at( r ) );
+  }
+  async_expected_.insert( stamp );
+  ++async_stamps_;
+  async_messages_sent_ += num_processes;
+#else
+  throw std::logic_error( "EXPERIMENTAL asynchronous exchange needs MPI" );
+#endif
+}
+
+void
+EventDeliveryManager::async_receive_( const long stamp )
+{
+#ifdef HAVE_MPI
+  const size_t num_processes = kernel().mpi_manager.get_num_processes();
+  std::vector< std::vector< SpikeData > > received( num_processes );
+  std::vector< bool > got( num_processes, false );
+  // in arrival order: one message for this stamp from every rank, each placed by its source
+  for ( size_t m = 0; m < num_processes; ++m )
+  {
+    MPI_Message message;
+    MPI_Status status;
+    MPI_Mprobe( MPI_ANY_SOURCE, async_tag( stamp ), async_comm(), &message, &status );
+    const size_t source = static_cast< size_t >( status.MPI_SOURCE );
+    if ( source >= num_processes or got.at( source ) )
+    {
+      throw std::logic_error( "EXPERIMENTAL asynchronous exchange: a second message for one stamp from one rank" );
+    }
+    got.at( source ) = true;
+    int bytes = 0;
+    MPI_Get_count( &status, MPI_BYTE, &bytes );
+    assert( bytes % sizeof( SpikeData ) == 0 );
+    received.at( source ).resize( bytes / sizeof( SpikeData ) );
+    MPI_Mrecv( received.at( source ).data(), bytes, MPI_BYTE, &message, MPI_STATUS_IGNORE );
+  }
+  async_expected_.erase( stamp );
+  async_messages_received_ += num_processes;
+  if ( async_stats_ )
+  {
+    // another rank's message for stamp + 2 (+ 3) here means it finished slice stamp (+ 1) before this one began it
+    long lead = 0;
+    for ( long ahead = 1; ahead <= 2; ++ahead )
+    {
+      int flag = 0;
+      MPI_Iprobe( MPI_ANY_SOURCE, async_tag( stamp + 1 + ahead ), async_comm(), &flag, MPI_STATUS_IGNORE );
+      if ( flag )
+      {
+        lead = ahead;
+      }
+    }
+    async_largest_lead_ = std::max( async_largest_lead_, lead );
+  }
+  // NEST's receive buffer: one chunk per rank of a common size, the last entry marked as the end, an empty chunk as
+  // invalid; stock delivery (deliver_events_) then reads it unchanged, in rank order
+  size_t chunk = 1;
+  for ( const auto& v : received )
+  {
+    chunk = std::max( chunk, v.size() );
+  }
+  fused_deliver_buffer_.assign( num_processes * chunk, SpikeData() );
+  for ( size_t r = 0; r < num_processes; ++r )
+  {
+    // the negative control puts the last rank's spikes in the first chunk, so that they are delivered first
+    const auto& v = received.at( async_break_reverse_ ? num_processes - 1 - r : r );
+    if ( v.empty() )
+    {
+      fused_deliver_buffer_.at( r * chunk ).set_invalid_marker();
+      continue;
+    }
+    for ( size_t i = 0; i < v.size(); ++i )
+    {
+      fused_deliver_buffer_.at( r * chunk + i ) = v.at( i );
+    }
+    fused_deliver_buffer_.at( r * chunk + v.size() - 1 ).set_end_marker();
+  }
+  fused_deliver_chunk_ = chunk;
+#endif
+}
+
+void
+EventDeliveryManager::async_complete_sends_( const long stamp )
+{
+#ifdef HAVE_MPI
+  while ( not async_sent_.empty() and async_sent_.begin()->first <= stamp )
+  {
+    auto& requests = async_sent_.begin()->second.second;
+    MPI_Waitall( static_cast< int >( requests.size() ), requests.data(), MPI_STATUSES_IGNORE );
+    async_sent_.erase( async_sent_.begin() );
+  }
+#endif
 }
 
 size_t

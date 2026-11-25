@@ -143,6 +143,29 @@ public:
    */
   void async_send( const long stamp );
 
+  //! EXPERIMENTAL: whether the lockstep arm is on (NEST_ASYNC=lockstep_p2p).
+  bool
+  lockstep_p2p() const
+  {
+    return lockstep_p2p_;
+  }
+
+  //! EXPERIMENTAL: the lockstep arm's exchange of this slice's spikes, completed before it returns. Master only.
+  void lockstep_p2p_exchange( const long stamp );
+
+  //! EXPERIMENTAL: the master's cumulative exchange times (s) and what it posted, for the cycle log.
+  void
+  get_exchange_totals( double& post, double& wait, double& receive, double& complete, size_t& messages,
+    size_t& bytes ) const
+  {
+    post = async_time_post_;
+    wait = async_time_wait_;
+    receive = async_time_receive_;
+    complete = async_time_complete_;
+    messages = async_messages_sent_;
+    bytes = async_bytes_sent_;
+  }
+
   /**
    * Add node ID of event sender to the spike_register.
    *
@@ -535,6 +558,14 @@ private:
   size_t async_messages_sent_ = 0;
   size_t async_messages_received_ = 0;
   long async_largest_lead_ = -1;
+  //! the lockstep arm: the same messages, completed inside the slice
+  bool lockstep_p2p_ = false;
+  //! the master's cumulative exchange times in seconds, and the bytes it posted
+  double async_time_post_ = 0.0;
+  double async_time_wait_ = 0.0;
+  double async_time_receive_ = 0.0;
+  double async_time_complete_ = 0.0;
+  size_t async_bytes_sent_ = 0;
   //! stamps whose messages are in flight
   std::set< long > async_expected_;
 #ifdef HAVE_MPI

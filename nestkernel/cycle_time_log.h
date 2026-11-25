@@ -55,6 +55,18 @@ public:
     long spike_buffer_last );
   //! The OpenMP synchronisation values of the same cycle, added once the threads' stopped values are published.
   void add_omp_entry( double omp_max, double omp_mean );
+  //! EXPERIMENTAL, NOT STOCK: the master's point-to-point exchange in the same cycle (zero in NEST's own path)
+  void add_exchange_entry( double post, double wait, double receive, double complete, long messages, long bytes );
+  //! EXPERIMENTAL: whether cycle `cycle` lies in the per-thread window (NEST_CYCLE_THREAD_WINDOW=start:count)
+  bool in_thread_window( size_t cycle ) const;
+  //! EXPERIMENTAL: append each thread's time in one phase (0 update, 1 delivery, 2 OpenMP synchronisation)
+  void add_thread_values( int phase, const std::vector< double >& end, const std::vector< double >& start );
+  //! the number of cycles logged so far
+  size_t
+  num_cycles() const
+  {
+    return cycle_update_time_.size();
+  }
   void to_dict( Dictionary& ) const;
 
 private:
@@ -73,6 +85,19 @@ private:
   std::vector< size_t > deliver_connections_;   // Connections visited by spike delivery in current cycle
   std::vector< size_t > spike_buffer_first_;    // Spike buffer per rank in the first all-to-all of current cycle
   std::vector< size_t > spike_buffer_last_;     // Spike buffer per rank in the last all-to-all of current cycle
+  // EXPERIMENTAL, NOT STOCK: the point-to-point exchange per cycle, and the per-thread window
+  std::vector< double > exchange_post_;
+  std::vector< double > exchange_wait_;
+  std::vector< double > exchange_receive_;
+  std::vector< double > exchange_complete_;
+  std::vector< size_t > exchange_messages_;
+  std::vector< size_t > exchange_bytes_;
+  long thread_window_start_ = -1;
+  long thread_window_count_ = 0;
+  size_t thread_window_threads_ = 0;
+  std::vector< double > thread_update_;
+  std::vector< double > thread_deliver_;
+  std::vector< double > thread_omp_;
 };
 
 }

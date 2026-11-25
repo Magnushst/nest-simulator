@@ -672,6 +672,17 @@ const std::string phaselok_mpi( "phaselok_mpi" );
 const std::string phaselok_deliver_connections( "phaselok_deliver_connections" );
 const std::string phaselok_spike_buffer_first( "phaselok_spike_buffer_first" );
 const std::string phaselok_spike_buffer_last( "phaselok_spike_buffer_last" );
+// EXPERIMENTAL, NOT STOCK: the point-to-point exchange and the per-thread window of the cycle log
+const std::string phaselok_exchange_post( "phaselok_exchange_post" );
+const std::string phaselok_exchange_wait( "phaselok_exchange_wait" );
+const std::string phaselok_exchange_receive( "phaselok_exchange_receive" );
+const std::string phaselok_exchange_complete( "phaselok_exchange_complete" );
+const std::string phaselok_exchange_messages( "phaselok_exchange_messages" );
+const std::string phaselok_exchange_bytes( "phaselok_exchange_bytes" );
+const std::string phaselok_thread_window( "phaselok_thread_window" );
+const std::string phaselok_thread_update( "phaselok_thread_update" );
+const std::string phaselok_thread_deliver( "phaselok_thread_deliver" );
+const std::string phaselok_thread_omp( "phaselok_thread_omp" );
 const std::string times( "times" );
 const std::string to_do( "to_do" );
 const std::string total_num_virtual_procs( "total_num_virtual_procs" );

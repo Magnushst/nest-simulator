@@ -915,6 +915,12 @@ nest::SimulationManager::update_()
     kernel().event_delivery_manager.get_sw_collocate_spike_data().elapsed();
   double start_current_mpi = kernel().get_mpi_synchronization_stopwatch().elapsed();
   size_t start_deliver_connections = kernel().event_delivery_manager.get_local_deliver_connections();
+  // EXPERIMENTAL, NOT STOCK: the point-to-point exchange's cumulative times and counts at the start
+  double start_exchange[ 4 ] = { 0.0, 0.0, 0.0, 0.0 };
+  size_t start_exchange_messages = 0;
+  size_t start_exchange_bytes = 0;
+  kernel().event_delivery_manager.get_exchange_totals( start_exchange[ 0 ], start_exchange[ 1 ],
+    start_exchange[ 2 ], start_exchange[ 3 ], start_exchange_messages, start_exchange_bytes );
   // Per-thread start and end values, allocated once here, so that logging a cycle allocates no memory.
   std::vector< double > start_current_update_vec;
   std::vector< double > start_current_deliver;
@@ -948,6 +954,11 @@ nest::SimulationManager::update_()
   if ( fused_ )
   {
     check_fused_support_();  // EXPERIMENTAL, NOT STOCK
+  }
+  if ( kernel().event_delivery_manager.lockstep_p2p()
+    and kernel().mpi_manager.any_true( kernel().event_delivery_manager.get_off_grid_communication() ) )
+  {
+    throw KernelException( "EXPERIMENTAL lockstep point-to-point exchange: off-grid spikes are not supported" );
   }
 
 // parallel section begins
@@ -1283,6 +1294,11 @@ nest::SimulationManager::update_()
                   kernel().event_delivery_manager.async_send( clock_.get_steps() + 2 );
                 }
               }
+              else if ( kernel().event_delivery_manager.lockstep_p2p() )
+              {
+                // EXPERIMENTAL, NOT STOCK: the lockstep arm, the same messages completed inside the slice
+                kernel().event_delivery_manager.lockstep_p2p_exchange( clock_.get_steps() + 1 );
+              }
               else
               {
                 kernel().event_delivery_manager.gather_spike_data();
@@ -1353,6 +1369,12 @@ nest::SimulationManager::update_()
           // barrier, below.
           sw_update_.elapsed_per_thread_wall( end_current_update_vec );
           sw_deliver_spike_data_.elapsed_per_thread_wall( end_current_deliver );
+          // EXPERIMENTAL, NOT STOCK: each thread's own values inside the window, before the starts move on
+          if ( cycle_time_log_.in_thread_window( cycle_time_log_.num_cycles() ) )
+          {
+            cycle_time_log_.add_thread_values( 0, end_current_update_vec, start_current_update_vec );
+            cycle_time_log_.add_thread_values( 1, end_current_deliver, start_current_deliver );
+          }
           const auto update_mm = phase_max_mean( end_current_update_vec, start_current_update_vec );
           const auto deliver_mm = phase_max_mean( end_current_deliver, start_current_deliver );
 
@@ -1378,6 +1400,27 @@ nest::SimulationManager::update_()
             spike_buffer_first,
             spike_buffer_last );
 
+          // EXPERIMENTAL, NOT STOCK: the master's point-to-point exchange in this cycle
+          {
+            double now_exchange[ 4 ] = { 0.0, 0.0, 0.0, 0.0 };
+            size_t now_messages = 0;
+            size_t now_bytes = 0;
+            kernel().event_delivery_manager.get_exchange_totals(
+              now_exchange[ 0 ], now_exchange[ 1 ], now_exchange[ 2 ], now_exchange[ 3 ], now_messages, now_bytes );
+            cycle_time_log_.add_exchange_entry( now_exchange[ 0 ] - start_exchange[ 0 ],
+              now_exchange[ 1 ] - start_exchange[ 1 ],
+              now_exchange[ 2 ] - start_exchange[ 2 ],
+              now_exchange[ 3 ] - start_exchange[ 3 ],
+              static_cast< long >( now_messages - start_exchange_messages ),
+              static_cast< long >( now_bytes - start_exchange_bytes ) );
+            for ( size_t i = 0; i < 4; ++i )
+            {
+              start_exchange[ i ] = now_exchange[ i ];
+            }
+            start_exchange_messages = now_messages;
+            start_exchange_bytes = now_bytes;
+          }
+
 #endif
         }
 // end of master section, all threads have to synchronize at this point
@@ -1389,6 +1432,10 @@ nest::SimulationManager::update_()
         // barrier, which the master reaches only after this block. No barrier is added.
 #pragma omp master
         {
+          if ( cycle_time_log_.in_thread_window( cycle_time_log_.num_cycles() - 1 ) )  // EXPERIMENTAL, NOT STOCK
+          {
+            cycle_time_log_.add_thread_values( 2, end_current_omp, start_current_omp );
+          }
           const auto omp_mm = phase_max_mean( end_current_omp, start_current_omp );
           cycle_time_log_.add_omp_entry( omp_mm.first, omp_mm.second );
         }

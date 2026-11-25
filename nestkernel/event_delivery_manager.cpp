@@ -114,6 +114,16 @@ EventDeliveryManager::initialize( const bool adjust_number_of_threads_or_rng_onl
     async_messages_received_ = 0;
     async_largest_lead_ = -1;
     async_expected_.clear();
+    lockstep_p2p_ = mode != nullptr and std::string( mode ) == "lockstep_p2p";
+    async_time_post_ = 0.0;
+    async_time_wait_ = 0.0;
+    async_time_receive_ = 0.0;
+    async_time_complete_ = 0.0;
+    async_bytes_sent_ = 0;
+    if ( lockstep_p2p_ )
+    {
+      std::cerr << "EXPERIMENTAL NOT STOCK: lockstep point-to-point exchange is on" << std::endl;
+    }
     if ( async_break_reverse_ )
     {
       std::cerr << "EXPERIMENTAL NOT STOCK: negative control: ranks delivered in reverse order" << std::endl;
@@ -159,7 +169,7 @@ void
 EventDeliveryManager::finalize( const bool adjust_number_of_threads_or_rng_only )
 {
   // EXPERIMENTAL, NOT STOCK: drain the asynchronous exchange (the reset of the kernel is collective)
-  if ( async_ and not adjust_number_of_threads_or_rng_only )
+  if ( ( async_ or lockstep_p2p_ ) and not adjust_number_of_threads_or_rng_only )
   {
     while ( not async_expected_.empty() )
     {
@@ -168,7 +178,9 @@ EventDeliveryManager::finalize( const bool adjust_number_of_threads_or_rng_only 
     async_complete_sends_( std::numeric_limits< long >::max() );
     if ( async_stamps_ > 0 )
     {
-      std::cerr << "EXPERIMENTAL NOT STOCK: asynchronous exchange, rank " << kernel().mpi_manager.get_rank()
+      std::cerr << "EXPERIMENTAL NOT STOCK: "
+                << ( async_ ? "asynchronous exchange" : "lockstep point-to-point exchange" ) << ", rank "
+                << kernel().mpi_manager.get_rank()
                 << ": stamps " << async_stamps_ << ", messages sent " << async_messages_sent_ << ", received "
                 << async_messages_received_ << ", largest lead " << async_largest_lead_ << " slices" << std::endl;
     }
@@ -648,7 +660,7 @@ EventDeliveryManager::get_global_max_spikes_per_rank_( const SendBufferPosition&
 void
 EventDeliveryManager::deliver_events( const size_t tid )
 {
-  if ( fused_ )
+  if ( fused_ or lockstep_p2p_ )
   {
     // EXPERIMENTAL, NOT STOCK: the spikes held for this slice, delivered as stock delivers them
     if ( fused_deliver_ready_ )
@@ -1267,6 +1279,16 @@ async_mix( std::uint64_t x )
 #endif
 
 void
+EventDeliveryManager::lockstep_p2p_exchange( const long stamp )
+{
+  // EXPERIMENTAL, NOT STOCK: post, receive from every rank, complete; the next slice delivers in stock order
+  async_send( stamp );
+  async_receive_( stamp );
+  async_complete_sends_( stamp );
+  fused_deliver_ready_ = true;
+}
+
+void
 EventDeliveryManager::async_send( const long stamp )
 {
 #ifdef HAVE_MPI
@@ -1278,6 +1300,7 @@ EventDeliveryManager::async_send( const long stamp )
     std::this_thread::sleep_for(
       std::chrono::microseconds( async_mix( key ) % static_cast< std::uint64_t >( async_jitter_us_ + 1 ) ) );
   }
+  const auto post_start = std::chrono::steady_clock::now();
   // collocate in stock order: writing thread, then entry order (collocate_spike_data_buffers_)
   std::vector< std::vector< SpikeData > > per_rank( num_processes );
   for ( auto& emitted_spikes_per_thread : emitted_spikes_register_ )
@@ -1303,6 +1326,11 @@ EventDeliveryManager::async_send( const long stamp )
   async_expected_.insert( stamp );
   ++async_stamps_;
   async_messages_sent_ += num_processes;
+  for ( const auto& v : slot.first )
+  {
+    async_bytes_sent_ += v.size() * sizeof( SpikeData );
+  }
+  async_time_post_ += std::chrono::duration< double >( std::chrono::steady_clock::now() - post_start ).count();
 #else
   throw std::logic_error( "EXPERIMENTAL asynchronous exchange needs MPI" );
 #endif
@@ -1320,7 +1348,20 @@ EventDeliveryManager::async_receive_( const long stamp )
   {
     MPI_Message message;
     MPI_Status status;
-    MPI_Mprobe( MPI_ANY_SOURCE, async_tag( stamp ), async_comm(), &message, &status );
+    for ( ;; )
+    {
+      int found = 0;
+      const auto poll_start = std::chrono::steady_clock::now();
+      MPI_Improbe( MPI_ANY_SOURCE, async_tag( stamp ), async_comm(), &found, &message, &status );
+      const double poll = std::chrono::duration< double >( std::chrono::steady_clock::now() - poll_start ).count();
+      if ( found )
+      {
+        async_time_receive_ += poll;
+        break;
+      }
+      async_time_wait_ += poll;
+    }
+    const auto receive_start = std::chrono::steady_clock::now();
     const size_t source = static_cast< size_t >( status.MPI_SOURCE );
     if ( source >= num_processes or got.at( source ) )
     {
@@ -1332,6 +1373,7 @@ EventDeliveryManager::async_receive_( const long stamp )
     assert( bytes % sizeof( SpikeData ) == 0 );
     received.at( source ).resize( bytes / sizeof( SpikeData ) );
     MPI_Mrecv( received.at( source ).data(), bytes, MPI_BYTE, &message, MPI_STATUS_IGNORE );
+    async_time_receive_ += std::chrono::duration< double >( std::chrono::steady_clock::now() - receive_start ).count();
   }
   async_expected_.erase( stamp );
   async_messages_received_ += num_processes;
@@ -1350,6 +1392,7 @@ EventDeliveryManager::async_receive_( const long stamp )
     }
     async_largest_lead_ = std::max( async_largest_lead_, lead );
   }
+  const auto assembly_start = std::chrono::steady_clock::now();
   // NEST's receive buffer: one chunk per rank of a common size, the last entry marked as the end, an empty chunk as
   // invalid; stock delivery (deliver_events_) then reads it unchanged, in rank order
   size_t chunk = 1;
@@ -1374,6 +1417,7 @@ EventDeliveryManager::async_receive_( const long stamp )
     fused_deliver_buffer_.at( r * chunk + v.size() - 1 ).set_end_marker();
   }
   fused_deliver_chunk_ = chunk;
+  async_time_receive_ += std::chrono::duration< double >( std::chrono::steady_clock::now() - assembly_start ).count();
 #endif
 }
 
@@ -1381,12 +1425,14 @@ void
 EventDeliveryManager::async_complete_sends_( const long stamp )
 {
 #ifdef HAVE_MPI
+  const auto complete_start = std::chrono::steady_clock::now();
   while ( not async_sent_.empty() and async_sent_.begin()->first <= stamp )
   {
     auto& requests = async_sent_.begin()->second.second;
     MPI_Waitall( static_cast< int >( requests.size() ), requests.data(), MPI_STATUSES_IGNORE );
     async_sent_.erase( async_sent_.begin() );
   }
+  async_time_complete_ += std::chrono::duration< double >( std::chrono::steady_clock::now() - complete_start ).count();
 #endif
 }
 

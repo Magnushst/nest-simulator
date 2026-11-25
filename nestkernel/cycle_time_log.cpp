@@ -22,6 +22,14 @@
 
 #include "cycle_time_log.h"
 
+#include <utility>
+
+#include <string>
+
+#include <cstdlib>
+
+#include <algorithm>
+
 // Includes from nestkernel:
 #include "kernel_manager.h"
 #include "nest_names.h"
@@ -66,6 +74,30 @@ CycleTimeLog::clear()
   deliver_connections_.clear();
   spike_buffer_first_.clear();
   spike_buffer_last_.clear();
+  // EXPERIMENTAL, NOT STOCK
+  exchange_post_.clear();
+  exchange_wait_.clear();
+  exchange_receive_.clear();
+  exchange_complete_.clear();
+  exchange_messages_.clear();
+  exchange_bytes_.clear();
+  thread_update_.clear();
+  thread_deliver_.clear();
+  thread_omp_.clear();
+  thread_window_start_ = -1;
+  thread_window_count_ = 0;
+  thread_window_threads_ = 0;
+  const char* window = std::getenv( "NEST_CYCLE_THREAD_WINDOW" );
+  if ( window != nullptr )
+  {
+    const std::string spec( window );
+    const size_t colon = spec.find( ':' );
+    if ( colon != std::string::npos )
+    {
+      thread_window_start_ = std::max( 0L, std::atol( spec.substr( 0, colon ).c_str() ) );
+      thread_window_count_ = std::max( 0L, std::atol( spec.substr( colon + 1 ).c_str() ) );
+    }
+  }
 }
 
 void
@@ -96,6 +128,36 @@ CycleTimeLog::add_entry( double cycle_update_time,
   deliver_connections_.emplace_back( deliver_connections );
   spike_buffer_first_.emplace_back( spike_buffer_first );
   spike_buffer_last_.emplace_back( spike_buffer_last );
+}
+
+void
+CycleTimeLog::add_exchange_entry( double post, double wait, double receive, double complete, long messages,
+  long bytes )
+{
+  exchange_post_.emplace_back( post );
+  exchange_wait_.emplace_back( wait );
+  exchange_receive_.emplace_back( receive );
+  exchange_complete_.emplace_back( complete );
+  exchange_messages_.emplace_back( messages );
+  exchange_bytes_.emplace_back( bytes );
+}
+
+bool
+CycleTimeLog::in_thread_window( size_t cycle ) const
+{
+  return thread_window_start_ >= 0 and static_cast< long >( cycle ) >= thread_window_start_
+    and static_cast< long >( cycle ) < thread_window_start_ + thread_window_count_;
+}
+
+void
+CycleTimeLog::add_thread_values( int phase, const std::vector< double >& end, const std::vector< double >& start )
+{
+  thread_window_threads_ = end.size();
+  std::vector< double >& out = phase == 0 ? thread_update_ : ( phase == 1 ? thread_deliver_ : thread_omp_ );
+  for ( size_t t = 0; t < end.size(); ++t )
+  {
+    out.emplace_back( end[ t ] - start[ t ] );
+  }
 }
 
 void
@@ -153,6 +215,28 @@ CycleTimeLog::to_dict( Dictionary& events ) const
 
   auto& spike_buffer_last = events.get_or_create_vector< long >( names::phaselok_spike_buffer_last );
   spike_buffer_last.insert( spike_buffer_last.end(), spike_buffer_last_.begin(), spike_buffer_last_.end() );
+
+  // EXPERIMENTAL, NOT STOCK: the point-to-point exchange per cycle, and the per-thread window
+  const std::vector< std::pair< const std::string*, const std::vector< double >* > > doubles = {
+    { &names::phaselok_exchange_post, &exchange_post_ },
+    { &names::phaselok_exchange_wait, &exchange_wait_ },
+    { &names::phaselok_exchange_receive, &exchange_receive_ },
+    { &names::phaselok_exchange_complete, &exchange_complete_ },
+    { &names::phaselok_thread_update, &thread_update_ },
+    { &names::phaselok_thread_deliver, &thread_deliver_ },
+    { &names::phaselok_thread_omp, &thread_omp_ } };
+  for ( const auto& [ name, values ] : doubles )
+  {
+    auto& v = events.get_or_create_vector< double >( *name );
+    v.insert( v.end(), values->begin(), values->end() );
+  }
+  auto& messages = events.get_or_create_vector< long >( names::phaselok_exchange_messages );
+  messages.insert( messages.end(), exchange_messages_.begin(), exchange_messages_.end() );
+  auto& bytes = events.get_or_create_vector< long >( names::phaselok_exchange_bytes );
+  bytes.insert( bytes.end(), exchange_bytes_.begin(), exchange_bytes_.end() );
+  auto& window = events.get_or_create_vector< long >( names::phaselok_thread_window );
+  window.insert(
+    window.end(), { thread_window_start_, thread_window_count_, static_cast< long >( thread_window_threads_ ) } );
 }
 
 }

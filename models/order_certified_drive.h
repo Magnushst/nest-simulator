@@ -44,8 +44,8 @@ struct ThreadTable
   std::vector< std::vector< size_t > > gen_targets;  //!< per generator: target indices, in connection order
   std::vector< double > weight;                      //!< per target index: the connection's weight
   std::vector< long > delay;                         //!< per target index: the connection's delay in steps
-  std::vector< unsigned long > counts;               //!< per target index and lag of the slice: the draw
-  long slice_len = 0;                                //!< lags in the current slice
+  std::vector< unsigned long > counts;               //!< [target * stride + lag - from]: the draw; allocated once per build
+  long stride = 0;                                   //!< counts per target row: the longest slice (min_delay steps)
 };
 
 //! Size the tables once (call_once) and install the prepass hook. Called from pre_run_hook.

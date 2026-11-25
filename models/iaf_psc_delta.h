@@ -221,11 +221,14 @@ public:
 
   void handle( SpikeEvent& ) override;
 
-  //! EXPERIMENTAL-NOT-STOCK (order-certified step): the index of this neuron's drive in its thread's table, or -1 for the stock path.
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step), U1: this neuron's row of drive counts (one per lag of the slice), the drive connection's weight
+  //! and delay in steps; counts == nullptr for the stock path.
   void
-  set_order_certified_index( long i )
+  set_order_certified_drive( const unsigned long* counts, double weight, long delay )
   {
-    order_certified_index_ = i;
+    order_certified_drive_counts_ = counts;
+    order_certified_drive_weight_ = weight;
+    order_certified_drive_delay_ = delay;
   }
   void handle( CurrentEvent& ) override;
   void handle( DataLoggingRequest& ) override;
@@ -377,7 +380,9 @@ private:
   Variables_ V_;
   Buffers_ B_;
 
-  long order_certified_index_ = -1;  //!< EXPERIMENTAL-NOT-STOCK (order-certified step)
+  const unsigned long* order_certified_drive_counts_ = nullptr;  //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U1
+  double order_certified_drive_weight_ = 0.0;                     //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U1
+  long order_certified_drive_delay_ = 0;                          //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U1
   /** @} */
 
   //! Mapping of recordables names to access functions

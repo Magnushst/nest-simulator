@@ -112,7 +112,7 @@ public:
 
   /**
    * EXPERIMENTAL-NOT-STOCK (order-certified step): the draws of update() and event_hook() for one slice, in the same order (lag, then the
-   * given targets in connection order), written to counts[target * slice_len + lag - from] instead of being sent.
+   * given targets in connection order), written to counts[target * stride + lag - from] instead of being sent.
    */
   void order_certified_draw( size_t tid,
     const Time& origin,
@@ -120,7 +120,7 @@ public:
     long to,
     const std::vector< size_t >& targets,
     std::vector< unsigned long >& counts,
-    long slice_len );
+    long stride );
 
 private:
   void init_state_() override;

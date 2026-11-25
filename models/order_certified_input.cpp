@@ -122,7 +122,7 @@ build( size_t tid, ThreadInput& t )
     {
       slot( t, s, i ) = t.neurons[ i ]->order_certified_input_get( s );
     }
-    t.neurons[ i ]->set_order_certified_input_index( static_cast< long >( i ) );
+    t.neurons[ i ]->set_order_certified_input( t.data.data() + i, t.n );
   }
   t.built = true;
   report( tid, t, "all conditions hold" );
@@ -140,7 +140,7 @@ write_back( ThreadInput& t )
       {
         t.neurons[ i ]->order_certified_input_set( s, slot( t, s, i ) );
       }
-      t.neurons[ i ]->set_order_certified_input_index( -1 );
+      t.neurons[ i ]->set_order_certified_input( nullptr, 0 );
     }
   }
   t = ThreadInput();

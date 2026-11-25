@@ -8,6 +8,8 @@
 #include "order_certified_input.h"
 
 // C++ includes:
+#include <algorithm>
+#include <cassert>
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
@@ -136,7 +138,7 @@ build( size_t tid, ThreadTable& tt )
     Node* node = it->get_node();
     if ( auto* n = dynamic_cast< iaf_psc_exp* >( node ) )
     {
-      n->set_order_certified_index( -1 );
+      n->set_order_certified_drive( nullptr, 0.0, 0 );
       if ( ok and not n->order_certified_deterministic() )  // with escape noise, its update draws
       {
         ok = false;
@@ -145,7 +147,7 @@ build( size_t tid, ThreadTable& tt )
     }
     else if ( auto* n = dynamic_cast< iaf_psc_delta* >( node ) )
     {
-      n->set_order_certified_index( -1 );
+      n->set_order_certified_drive( nullptr, 0.0, 0 );
     }
     else if ( auto* g = dynamic_cast< poisson_generator* >( node ) )
     {
@@ -201,15 +203,18 @@ build( size_t tid, ThreadTable& tt )
     return;
   }
 
+  tt.stride = kernel().connection_manager.get_min_delay();
+  tt.counts.assign( targets.size() * static_cast< size_t >( tt.stride ), 0 );  // never reallocated until the next build
   for ( size_t i = 0; i < targets.size(); ++i )
   {
+    const unsigned long* row = tt.counts.data() + i * static_cast< size_t >( tt.stride );
     if ( auto* n = dynamic_cast< iaf_psc_exp* >( targets[ i ] ) )
     {
-      n->set_order_certified_index( static_cast< long >( i ) );
+      n->set_order_certified_drive( row, tt.weight[ i ], tt.delay[ i ] );
     }
     else
     {
-      dynamic_cast< iaf_psc_delta* >( targets[ i ] )->set_order_certified_index( static_cast< long >( i ) );
+      dynamic_cast< iaf_psc_delta* >( targets[ i ] )->set_order_certified_drive( row, tt.weight[ i ], tt.delay[ i ] );
     }
   }
   tt.enabled = true;
@@ -269,8 +274,8 @@ prepass( size_t tid, const Time& origin, long from, long to )
   {
     return;
   }
-  tt.slice_len = to - from;
-  tt.counts.assign( tt.weight.size() * static_cast< size_t >( tt.slice_len ), 0 );
+  assert( to - from <= tt.stride );
+  std::fill( tt.counts.begin(), tt.counts.end(), 0UL );  // zero counts for lags without a draw
   for ( size_t g = 0; g < tt.generators.size(); ++g )
   {
     poisson_generator* gen = tt.generators[ g ];
@@ -278,7 +283,7 @@ prepass( size_t tid, const Time& origin, long from, long to )
     {
       continue;  // the node loop does not update frozen nodes
     }
-    gen->order_certified_draw( tid, origin, from, to, tt.gen_targets[ g ], tt.counts, tt.slice_len );
+    gen->order_certified_draw( tid, origin, from, to, tt.gen_targets[ g ], tt.counts, tt.stride );
   }
 }
 

@@ -153,7 +153,7 @@ nest::poisson_generator::order_certified_draw( size_t tid,
   long to,
   const std::vector< size_t >& targets,
   std::vector< unsigned long >& counts,
-  long slice_len )
+  long stride )
 {
   // EXPERIMENTAL-NOT-STOCK (order-certified step): the same tests and the same draws as update() and event_hook(), in the same order.
   if ( P_.rate_ <= 0 )
@@ -169,7 +169,7 @@ nest::poisson_generator::order_certified_draw( size_t tid,
     for ( const size_t i : targets )
     {
       const long n_spikes = V_.poisson_dist_( get_vp_specific_rng( tid ) );
-      counts[ i * static_cast< size_t >( slice_len ) + static_cast< size_t >( lag - from ) ] =
+      counts[ i * static_cast< size_t >( stride ) + static_cast< size_t >( lag - from ) ] =
         n_spikes > 0 ? static_cast< unsigned long >( n_spikes ) : 0UL;
     }
   }

@@ -299,23 +299,20 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
   // EXPERIMENTAL-NOT-STOCK (order-certified step): the drive of this slice, drawn by the prepass in the reference order. These are the additions
   // handle( SpikeEvent& ) makes for the generator's events: slot get_modulo( lag + delay ), channel by the sign of
   // weight x multiplicity, the product kept unfused. They go to slots of later slices only, as in stock.
-  if ( order_certified_index_ >= 0 )
+  if ( order_certified_drive_counts_ != nullptr )
   {
-    const order_certified_drive::ThreadTable& tt = order_certified_drive::table( get_thread() );
-    const size_t i = static_cast< size_t >( order_certified_index_ );
     for ( long lag = from; lag < to; ++lag )
     {
-      const unsigned long n = tt.counts[ i * static_cast< size_t >( tt.slice_len ) + static_cast< size_t >( lag - from ) ];
+      const unsigned long n = order_certified_drive_counts_[ lag - from ];
       if ( n > 0 )
       {
         const size_t multiplicity = n;
-        const double s = order_certified_drive::materialise( tt.weight[ i ] * multiplicity );
-        const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( lag + tt.delay[ i ] );
-        if ( order_certified_input_index_ >= 0 )  // U2
+        const double s = order_certified_drive::materialise( order_certified_drive_weight_ * multiplicity );
+        const size_t input_buffer_slot =
+          kernel().event_delivery_manager.get_modulo( lag + order_certified_drive_delay_ );
+        if ( order_certified_input_base_ != nullptr )  // U2
         {
-          order_certified_input::slot( order_certified_input::table( get_thread() ),
-            input_buffer_slot,
-            static_cast< size_t >( order_certified_input_index_ ) )[ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
+          order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
         }
         else
         {
@@ -349,10 +346,8 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
     // get read access to the correct input-buffer slot
     const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( lag );
     // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same slot, from the thread's table when it holds this neuron's input
-    auto& input = order_certified_input_index_ >= 0
-      ? order_certified_input::slot( order_certified_input::table( get_thread() ),
-        input_buffer_slot,
-        static_cast< size_t >( order_certified_input_index_ ) )
+    auto& input = order_certified_input_base_ != nullptr
+      ? order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ]
       : B_.input_buffer_.get_values_all_channels( input_buffer_slot );
 
     // the spikes arriving at T+1 have an immediate effect on the state of the
@@ -381,11 +376,9 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
     S_.i_1_ = input[ Buffers_::I1 ];
 
     // reset all values in the currently processed input-buffer slot
-    if ( order_certified_input_index_ >= 0 )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2
+    if ( order_certified_input_base_ != nullptr )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2
     {
-      order_certified_input::slot( order_certified_input::table( get_thread() ),
-        input_buffer_slot,
-        static_cast< size_t >( order_certified_input_index_ ) )
+      order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ]
         .fill( 0.0 );
     }
     else
@@ -409,11 +402,9 @@ nest::iaf_psc_exp::handle( SpikeEvent& e )
   const double s = e.get_weight() * e.get_multiplicity();
 
   // separate buffer channels for excitatory and inhibitory inputs
-  if ( order_certified_input_index_ >= 0 )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same addition, in the thread's table
+  if ( order_certified_input_base_ != nullptr )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same addition, in the thread's table
   {
-    order_certified_input::slot( order_certified_input::table( get_thread() ),
-      input_buffer_slot,
-      static_cast< size_t >( order_certified_input_index_ ) )[ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
+    order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
   }
   else
   {
@@ -425,7 +416,7 @@ void
 nest::iaf_psc_exp::handle( CurrentEvent& e )
 {
   assert( e.get_delay_steps() > 0 );
-  if ( order_certified_input_index_ >= 0 )
+  if ( order_certified_input_base_ != nullptr )
   {
     throw KernelException( "EXPERIMENTAL-NOT-STOCK order-certified U2: a CurrentEvent reached a neuron whose input is "
                            "held in its thread's table" );

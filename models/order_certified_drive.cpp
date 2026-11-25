@@ -7,6 +7,8 @@
 #include "order_certified_drive.h"
 
 // C++ includes:
+#include <cstdlib>
+#include <iostream>
 #include <mutex>
 #include <unordered_map>
 
@@ -36,6 +38,40 @@ namespace
 
 std::vector< ThreadTable > tables_;
 std::once_flag sized_;
+
+//! NEST_ORDER_CERTIFIED_OFF=1 keeps every thread on the stock path (the control); read once.
+bool
+switched_off()
+{
+  static const bool off = [] {
+    const char* v = std::getenv( "NEST_ORDER_CERTIFIED_OFF" );
+    return v != nullptr and v[ 0 ] == '1';
+  }();
+  return off;
+}
+
+//! NEST_ORDER_CERTIFIED_REPORT=1 prints one line per thread and build, so a run shows where U1 ran; read once.
+bool
+reporting()
+{
+  static const bool report = [] {
+    const char* v = std::getenv( "NEST_ORDER_CERTIFIED_REPORT" );
+    return v != nullptr and v[ 0 ] == '1';
+  }();
+  return report;
+}
+
+void
+report( size_t tid, const ThreadTable& tt, const char* reason )
+{
+  if ( reporting() )
+  {
+#pragma omp critical( order_certified_report )
+    std::cerr << "order_certified_drive: rank " << kernel().mpi_manager.get_rank() << " thread " << tid << " enabled "
+              << tt.enabled << " generators " << tt.generators.size() << " targets " << tt.weight.size() << " ("
+              << reason << ")" << std::endl;
+  }
+}
 
 //! Append the targets of one connector of a generator; false if a connection is not eligible.
 template < typename TargetIdentifierT >
@@ -89,7 +125,8 @@ build( size_t tid, ThreadTable& tt )
 
   std::vector< Node* > targets;
   std::unordered_map< Node*, size_t > index;
-  bool ok = true;
+  bool ok = not switched_off();
+  const char* reason = ok ? "all conditions hold" : "switched off";
 
   // 1. Every node on the thread is of a known model, and none but the generators draws in the update phase.
   const SparseNodeArray& nodes = kernel().node_manager.get_local_nodes( tid );
@@ -99,7 +136,11 @@ build( size_t tid, ThreadTable& tt )
     if ( auto* n = dynamic_cast< iaf_psc_exp* >( node ) )
     {
       n->set_order_certified_index( -1 );
-      ok = ok and n->order_certified_deterministic();  // no escape noise, so no draw in its update
+      if ( ok and not n->order_certified_deterministic() )  // with escape noise, its update draws
+      {
+        ok = false;
+        reason = "an iaf_psc_exp with escape noise";
+      }
     }
     else if ( auto* n = dynamic_cast< iaf_psc_delta* >( node ) )
     {
@@ -112,11 +153,13 @@ build( size_t tid, ThreadTable& tt )
     else if ( dynamic_cast< spike_generator* >( node ) != nullptr )
     {
       ok = false;  // it could add to a neuron's slot in the update phase, in between the drive
+      reason = "a spike_generator on the thread";
     }
     else if ( dynamic_cast< parrot_neuron* >( node ) == nullptr and dynamic_cast< dc_generator* >( node ) == nullptr
       and dynamic_cast< spike_recorder* >( node ) == nullptr and dynamic_cast< multimeter* >( node ) == nullptr )
     {
       ok = false;  // an unknown model might draw from the thread's stream in the update phase
+      reason = "a node of another model on the thread";
     }
   }
 
@@ -138,15 +181,22 @@ build( size_t tid, ThreadTable& tt )
           cb, tid, tt.gen_targets.back(), targets, tt.weight, tt.delay, index ) )
       {
         ok = false;
+        reason = "a drive connection that is not eligible";
         break;
       }
     }
   }
 
-  if ( not ok or tt.generators.empty() )
+  if ( ok and tt.generators.empty() )
+  {
+    ok = false;
+    reason = "no poisson_generator on the thread";
+  }
+  if ( not ok )
   {
     tt = ThreadTable();
     tt.dirty = false;
+    report( tid, tt, reason );
     return;
   }
 
@@ -162,6 +212,7 @@ build( size_t tid, ThreadTable& tt )
     }
   }
   tt.enabled = true;
+  report( tid, tt, reason );
 }
 
 void

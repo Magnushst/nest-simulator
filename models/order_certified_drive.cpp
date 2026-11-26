@@ -10,8 +10,10 @@
 // C++ includes:
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 
@@ -109,6 +111,10 @@ append_targets( const ConnectorBase* cb,
     if ( target->is_frozen() )
     {
       return false;  // stock adds to a frozen target's buffer, but its update() never runs here
+    }
+    if ( conn.get_delay_steps() > std::numeric_limits< std::int32_t >::max() )
+    {
+      return false;  // iaf_psc_exp holds the drive's delay in 32 bits (its object layout)
     }
     const size_t i = targets.size();
     index[ target ] = i;

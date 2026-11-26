@@ -34,6 +34,10 @@
 #include "kernel_manager.h"
 #include "order_certified_drive.h"  // EXPERIMENTAL-NOT-STOCK (order-certified step)
 #include "order_certified_input.h"  // EXPERIMENTAL-NOT-STOCK (order-certified step)
+
+// EXPERIMENTAL-NOT-STOCK (order-certified step): stock's object is 672 bytes; the five new members must end at byte 704,
+// the end of line 10, or update and handle would touch an object line that stock never does (MEASUREMENT_MAM_U1U2.md).
+static_assert( sizeof( nest::iaf_psc_exp ) == 704, "the order-certified members must fill exactly bytes 672-703" );
 #include "nest_impl.h"
 #include "numerics.h"
 #include "ring_buffer_impl.h"
@@ -296,9 +300,8 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
 {
   const double h = Time::get_resolution().get_ms();
 
-  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the row length of this thread's input table, read once per update
-  const size_t order_certified_stride =
-    order_certified_input_base_ != nullptr ? order_certified_input::stride( get_thread() ) : 0;
+  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the row length of this thread's input table (object line 10)
+  const size_t order_certified_stride = order_certified_input_stride_;
 
   // EXPERIMENTAL-NOT-STOCK (order-certified step): the drive of this slice, drawn by the prepass in the reference order. These are the additions
   // handle( SpikeEvent& ) makes for the generator's events: slot get_modulo( lag + delay ), channel by the sign of
@@ -408,7 +411,7 @@ nest::iaf_psc_exp::handle( SpikeEvent& e )
   // separate buffer channels for excitatory and inhibitory inputs
   if ( order_certified_input_base_ != nullptr )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same addition, in the thread's table
   {
-    order_certified_input_base_[ input_buffer_slot * order_certified_input::stride( get_thread() ) ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
+    order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
   }
   else
   {

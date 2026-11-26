@@ -296,6 +296,10 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
 {
   const double h = Time::get_resolution().get_ms();
 
+  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the row length of this thread's input table, read once per update
+  const size_t order_certified_stride =
+    order_certified_input_base_ != nullptr ? order_certified_input::stride( get_thread() ) : 0;
+
   // EXPERIMENTAL-NOT-STOCK (order-certified step): the drive of this slice, drawn by the prepass in the reference order. These are the additions
   // handle( SpikeEvent& ) makes for the generator's events: slot get_modulo( lag + delay ), channel by the sign of
   // weight x multiplicity, the product kept unfused. They go to slots of later slices only, as in stock.
@@ -312,7 +316,7 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
           kernel().event_delivery_manager.get_modulo( lag + order_certified_drive_delay_ );
         if ( order_certified_input_base_ != nullptr )  // U2
         {
-          order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
+          order_certified_input_base_[ input_buffer_slot * order_certified_stride ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
         }
         else
         {
@@ -347,7 +351,7 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
     const size_t input_buffer_slot = kernel().event_delivery_manager.get_modulo( lag );
     // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same slot, from the thread's table when it holds this neuron's input
     auto& input = order_certified_input_base_ != nullptr
-      ? order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ]
+      ? order_certified_input_base_[ input_buffer_slot * order_certified_stride ]
       : B_.input_buffer_.get_values_all_channels( input_buffer_slot );
 
     // the spikes arriving at T+1 have an immediate effect on the state of the
@@ -378,7 +382,7 @@ nest::iaf_psc_exp::update( const Time& origin, const long from, const long to )
     // reset all values in the currently processed input-buffer slot
     if ( order_certified_input_base_ != nullptr )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2
     {
-      order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ]
+      order_certified_input_base_[ input_buffer_slot * order_certified_stride ]
         .fill( 0.0 );
     }
     else
@@ -404,7 +408,7 @@ nest::iaf_psc_exp::handle( SpikeEvent& e )
   // separate buffer channels for excitatory and inhibitory inputs
   if ( order_certified_input_base_ != nullptr )  // EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the same addition, in the thread's table
   {
-    order_certified_input_base_[ input_buffer_slot * order_certified_input_stride_ ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
+    order_certified_input_base_[ input_buffer_slot * order_certified_input::stride( get_thread() ) ][ s > 0 ? Buffers_::SYN_EX : Buffers_::SYN_IN ] += s;
   }
   else
   {

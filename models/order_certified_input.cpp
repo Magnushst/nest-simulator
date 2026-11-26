@@ -28,6 +28,9 @@ namespace nest
 {
 namespace order_certified_input
 {
+
+std::vector< size_t > thread_stride;
+
 namespace
 {
 
@@ -123,8 +126,9 @@ build( size_t tid, ThreadInput& t )
     {
       slot( t, s, i ) = t.neurons[ i ]->order_certified_input_get( s );
     }
-    t.neurons[ i ]->set_order_certified_input( t.data.data() + i, t.n );
+    t.neurons[ i ]->set_order_certified_input( t.data.data() + i );
   }
+  thread_stride[ tid ] = t.n;
   t.built = true;
   report( tid, t, "all conditions hold" );
 }
@@ -141,7 +145,7 @@ write_back( ThreadInput& t )
       {
         t.neurons[ i ]->order_certified_input_set( s, slot( t, s, i ) );
       }
-      t.neurons[ i ]->set_order_certified_input( nullptr, 0 );
+      t.neurons[ i ]->set_order_certified_input( nullptr );
     }
   }
   t = ThreadInput();
@@ -154,6 +158,7 @@ post_run_hook()
   for ( size_t tid = 0; tid < tables_.size(); ++tid )
   {
     write_back( tables_[ tid ] );
+    thread_stride[ tid ] = 0;
   }
 }
 
@@ -162,7 +167,12 @@ post_run_hook()
 void
 register_hooks()
 {
-  std::call_once( sized_, [] { tables_.resize( kernel().vp_manager.get_num_threads() ); } );
+  std::call_once( sized_,
+    []
+    {
+      tables_.resize( kernel().vp_manager.get_num_threads() );
+      thread_stride.assign( kernel().vp_manager.get_num_threads(), 0 );
+    } );
   order_certified_post_run.store( &post_run_hook, std::memory_order_release );
 }
 

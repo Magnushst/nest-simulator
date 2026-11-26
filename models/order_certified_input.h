@@ -57,6 +57,20 @@ slot( ThreadInput& t, size_t s, size_t i )
   return t.data[ s * t.n + i ];
 }
 
+/**
+ * Per thread: the row length of its table (the neurons in it), 0 while no table is built. Every update and every
+ * delivered spike read it, so it is held once per thread: as a member of each neuron it took an object line that stock
+ * NEST never touches (MEASUREMENT_MAM_U1U2.md, 26 Nov 2026).
+ */
+extern std::vector< size_t > thread_stride;
+
+//! The row length of thread tid's table; a neuron's slot s is at its base pointer + s * stride( tid ).
+inline size_t
+stride( size_t tid )
+{
+  return thread_stride[ tid ];
+}
+
 }  // namespace order_certified_input
 }  // namespace nest
 

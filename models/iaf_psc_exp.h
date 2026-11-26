@@ -281,13 +281,12 @@ public:
     order_certified_drive_delay_ = delay;
   }
 
-  //! EXPERIMENTAL-NOT-STOCK (order-certified step), U2: this neuron's column in its thread's input table (slot s at base[ s * stride ]), or
-  //! nullptr for its own buffer.
+  //! EXPERIMENTAL-NOT-STOCK (order-certified step), U2: this neuron's column in its thread's input table (slot s at
+  //! base[ s * order_certified_input::stride( thread ) ]), or nullptr for its own buffer.
   void
-  set_order_certified_input( std::array< double, 4 >* base, size_t stride )
+  set_order_certified_input( std::array< double, 4 >* base )
   {
     order_certified_input_base_ = base;
-    order_certified_input_stride_ = stride;
   }
 
   //! EXPERIMENTAL-NOT-STOCK (order-certified step), U2: the slots of this neuron's own buffer, read and written by the table's build and write-back.
@@ -511,7 +510,9 @@ private:
   double order_certified_drive_weight_ = 0.0;                     //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U1
   long order_certified_drive_delay_ = 0;                          //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U1
   std::array< double, 4 >* order_certified_input_base_ = nullptr;  //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U2
-  size_t order_certified_input_stride_ = 0;                        //!< EXPERIMENTAL-NOT-STOCK (order-certified step), U2
+  // EXPERIMENTAL-NOT-STOCK (order-certified step): the four members above fill bytes 672-703, the free end of the
+  // object's line 10, which stock's update already touches (stock allocates 672 bytes); the table's stride is held per
+  // thread (order_certified_input::stride), not here, so no object line is added.
   /** @} */
 
   //! Mapping of recordables names to access functions
